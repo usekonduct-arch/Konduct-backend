@@ -40,9 +40,10 @@ append-only and hash-chained per account; posting the same transaction id twice 
 | Forged, swapped or old QR sticker | HMAC-signed `K1.<vehicle>.<version>.<sig>`; re-issuing bumps the version; the preview shows driver, plate and route, and warns about recently changed stickers | `core.test.ts`, `money.emu.ts` |
 | Forged or replayed Bachs webhook | HMAC-SHA256 over timestamp + raw body, 5-minute window, constant-time compare, origin must be our account or one of our drivers' accounts, dedupe by event id | `core.test.ts`, `money.emu.ts` |
 | Genuine-looking webhook with wrong details | Every top-up is re-confirmed by a Bachs API read (reference, status, currency) before credit | `money.emu.ts` |
-| Stolen phone / PIN guessing | scrypt-hashed PINs (server only), 5 tries then a 30-minute lock and a security flag, burst rate limit; self-lock (`lockMyAccount`) | `money.emu.ts` |
+| Stolen phone, password or PIN guessing | scrypt-hashed PINs (server only), 5 tries then a 30-minute lock and a security flag, burst rate limit; self-lock (`lockMyAccount`) | `money.emu.ts` |
 | Suspended account keeps using an old token | Every call reads live profile status; suspension also revokes refresh tokens | `money.emu.ts` |
-| Changing payout bank to steal earnings | Needs a fresh SMS sign-in (< 5 min) + PIN, bank name must match the verified driver, second-person approval, 24h hold before first payout, push alert | `money.emu.ts` |
+| Changing payout bank to steal earnings | Needs a fresh password sign-in (< 5 min) + PIN, bank name must match the verified driver, second-person approval, 24h hold before first payout, push alert | `money.emu.ts` |
+| Someone signs up with a driver's email (emails aren't verified yet) | The email alone unlocks nothing: claiming a driver record needs the agent's one-time 8-character code, stored only as an HMAC, 5 wrong tries lock it | `money.emu.ts` |
 | Insider abuse | Maker-checker for refunds > ₦5k, manual adjustments, deposit assignment, KYC tier, role grants and resuming payouts; the approver must be a different person with the right role; append-only audit log | `money.emu.ts` |
 | Ledger tampering in the database | Per-account hash chain; nightly `verifyAccount` re-derives every touched wallet | `money.emu.ts` |
 | Books drift from the bank | Nightly reconciliation against the Bachs balance halts automatic payouts and raises an alert | `money.emu.ts` |
@@ -55,9 +56,9 @@ append-only and hash-chained per account; posting the same transaction id twice 
 1. **Blaze plan**: Functions, phone auth and Secret Manager need it.
 2. **Firestore** in production mode. Its location is permanent; match `REGION` in `src/config.ts` and the app's `AppConfig.functionsRegion`.
 3. **Authentication**:
-   - Turn on Phone (riders and drivers) and Email/Password (staff).
+   - Click **Get started**, then turn on **Email/Password**: riders, drivers and staff all use it.
+     Email verification is deliberately off for now; drivers are protected by the agent's onboarding code instead.
    - Upgrade to **Identity Platform** and enable **multi-factor auth**. Staff endpoints refuse any sign-in without a second factor.
-   - Set the SMS region policy to allow Nigeria.
 4. **App Check**:
    - Register both Android apps with Play Integrity, then set `ENFORCE_APP_CHECK=true` in `functions/.env.<project>`.
    - In the console, also enforce App Check for Firestore.
@@ -67,7 +68,7 @@ append-only and hash-chained per account; posting the same transaction id twice 
 
 | Secret | What it is |
 | --- | --- |
-| `PHONE_HASH_KEY` | keyed hash for stored phone numbers |
+| `IDENTITY_KEY` | keyed hash for driver onboarding codes; changing it voids every unused code |
 | `QR_SIGNING_KEY` | signs stickers; changing it voids every printed sticker |
 | `OFFLINE_CODE_KEY` | derives the 6-character offline payment codes |
 | `BACHS_API_KEY` | `sk_sandbox_…` or `sk_live_…`, scopes below |
@@ -100,11 +101,20 @@ The indexes file also turns on TTL clean-up for `rateLimits`, `payQuotes` and `i
 
 Every later role is granted through `staffGrantRole` plus a second admin's approval.
 
+## How people sign in
+
+- **Riders**: email + password, then name + student ID (`registerRider`). The student ID is unique per campus.
+- **Drivers**: an agent onboards them at the park with `staffInviteDriver` (email, name, plate, route, checks), which
+  returns a one-time **8-character onboarding code**. The driver creates an account with that email in the
+  driver app and enters the code (`claimDriverAccount`). Lost or locked code: `staffResetDriverCode`.
+- **Staff**: email + password + a second factor (MFA), with a verified email.
+- Email verification for riders and drivers is planned; until then no email is trusted on its own.
+
 ## Known gaps (not yet built, or blocked on a decision)
 
 - **Per-rider virtual accounts (FR-WAL-01).** Bachs issues one number per account, so riders share Konduct's number and are matched by funding code or known sender. The alternative is a Bachs Connect account per rider, each needing BVN, ID and manual review. Decide with Bachs.
 - **Bank deposits aren't re-confirmed by API.** Deposits are trusted from the signed webhook and checked by nightly reconciliation. Bachs documents no lookup by `charge_id` for deposits, so ask Bachs for one.
-- **SMS (FR-NTF-02, FR-DRV-05).** Nothing sends SMS yet: no provider is chosen. Security notices go out as push notifications today.
+- **Email verification** for riders and drivers (planned next). **SMS (FR-NTF-02, FR-DRV-05).** Nothing sends SMS yet: no provider is chosen. Security notices go out as push notifications today.
 - **Deferred SRS items:**
   - Device binding (FR-AUTH-07, P1)
   - Instant cash-out (P1)

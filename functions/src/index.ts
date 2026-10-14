@@ -1,9 +1,9 @@
 /**
  * Konduct backend: every endpoint the apps and consoles can reach.
  *
- *  Rider     registerRider, setTransactionPin, changePin, payPreview, payConfirm, payUndo,
+ *  Rider     registerRider (email + password sign-in), setTransactionPin, changePin, payPreview, payConfirm, payUndo,
  *            createTopUp, openDispute, lockMyAccount, registerDevice
- *  Driver    claimDriverAccount, (setTransactionPin, changePin, lockMyAccount, registerDevice),
+ *  Driver    claimDriverAccount (agent's one-time code), (setTransactionPin, changePin, lockMyAccount, registerDevice),
  *            driverConfirmOfflineCode, driverSetPayoutAccount, driverRequestPayout
  *  Staff     staff* (MFA + role checked): onboarding, QR, routes, people, switches, approvals,
  *            disputes
@@ -15,12 +15,11 @@ import { onSchedule } from "firebase-functions/v2/scheduler";
 import { logger } from "firebase-functions";
 import { z } from "zod";
 
-import { BACHS_API_KEY, BACHS_WEBHOOK_SECRETS, OFFLINE_CODE_KEY, PHONE_HASH_KEY, QR_SIGNING_KEY, REGION } from "./config";
+import { BACHS_API_KEY, BACHS_WEBHOOK_SECRETS, IDENTITY_KEY, OFFLINE_CODE_KEY, QR_SIGNING_KEY, REGION } from "./config";
 import { handleBachsWebhook } from "./bachs/webhook";
 import { callable, Empty } from "./api/callable";
 import { db, stamp, touched } from "./lib/db";
-import { fail } from "./lib/errors";
-import { requireMember, requireStaff } from "./lib/guards";
+import { memberToken, requireMember, requireStaff } from "./lib/guards";
 import { changePin, claimDriverAccount, RegisterRider, registerRider, setTransactionPin } from "./domain/accounts";
 import { decide } from "./domain/approvals";
 import { OpenDispute, openDispute, ResolveDispute, resolveDispute, reviewDispute } from "./domain/disputes";
@@ -39,6 +38,7 @@ import {
   requestKycTier,
   requestReconRelease,
   requestRoleGrant,
+  resetDriverCode,
   setSwitches,
   SetSwitches,
   setUserStatus,
@@ -51,22 +51,16 @@ const PAY_MIN = Number(process.env.MIN_INSTANCES_PAY ?? 0); // 1 in production: 
 
 /* ---------------------------------------------------------------- sign-up */
 
-/** Before a role exists: only a verified phone number is required. */
-function phoneOnly(req: { auth?: { uid: string; token: Record<string, unknown> } }) {
-  const t = req.auth?.token;
-  if (!req.auth || !t?.phone_number) fail("unauthenticated", "no_phone", "Sign in with your phone number first.");
-  return { uid: req.auth.uid, phone: t.phone_number as string, role: t.role };
-}
-
+/** Before a role exists: an email + password sign-in is all that's required. */
 const registerRider_ = callable(RegisterRider, async (req, data) => {
-  const { uid, phone, role } = phoneOnly(req);
-  return registerRider(uid, phone, role, data);
-}, { secrets: [PHONE_HASH_KEY] });
+  const { uid, email, role } = memberToken(req);
+  return registerRider(uid, email, role, data);
+});
 
-const claimDriverAccount_ = callable(Empty, async (req) => {
-  const { uid, phone, role } = phoneOnly(req);
-  return claimDriverAccount(uid, phone, role);
-}, { secrets: [PHONE_HASH_KEY] });
+const claimDriverAccount_ = callable(z.strictObject({ code: z.string().max(16) }), async (req, data) => {
+  const { uid, email, role } = memberToken(req);
+  return claimDriverAccount(uid, email, role, data.code);
+}, { secrets: [IDENTITY_KEY] });
 
 const setTransactionPin_ = callable(z.strictObject({ pin: z.string().max(6) }), async (req, data) => {
   const actor = await requireMember(req, ["rider", "driver"]);
@@ -120,7 +114,13 @@ export const driverRequestPayout = callable(z.strictObject({ pin: z.string().max
 const uidField = z.string().regex(/^[A-Za-z0-9]{10,128}$/);
 const idField = z.string().regex(/^[A-Za-z0-9_-]{6,80}$/);
 
-export const staffInviteDriver = callable(InviteDriver, async (req, data) => inviteDriver(await requireStaff(req, ["agent", "ops", "admin"]), data));
+export const staffInviteDriver = callable(InviteDriver, async (req, data) => inviteDriver(await requireStaff(req, ["agent", "ops", "admin"]), data), {
+  secrets: [IDENTITY_KEY],
+});
+
+export const staffResetDriverCode = callable(z.strictObject({ email: z.string().max(120) }), async (req, data) =>
+  resetDriverCode(await requireStaff(req, ["agent", "ops", "admin"]), data.email), { secrets: [IDENTITY_KEY] },
+);
 
 export const staffIssueVehicleQr = callable(z.strictObject({ vehicleId: idField }), async (req, data) =>
   issueVehicleQr(await requireStaff(req, ["agent", "ops", "admin"]), data.vehicleId), { secrets: [QR_SIGNING_KEY] },
@@ -171,7 +171,7 @@ export const staffResolveDispute = callable(ResolveDispute, async (req, data) =>
 /* ------------------------------------------------------------------- Bachs */
 
 export const bachsWebhook = onRequest(
-  { region: REGION, secrets: [BACHS_WEBHOOK_SECRETS, BACHS_API_KEY, PHONE_HASH_KEY], memory: "256MiB", timeoutSeconds: 30, maxInstances: 20, cors: false },
+  { region: REGION, secrets: [BACHS_WEBHOOK_SECRETS, BACHS_API_KEY], memory: "256MiB", timeoutSeconds: 30, maxInstances: 20, cors: false },
   handleBachsWebhook,
 );
 

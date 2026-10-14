@@ -13,7 +13,7 @@ export type Role = MemberRole | StaffRole;
 export type Actor = {
   uid: string;
   role: Role;
-  phone: string | null;
+  email: string | null;
   /** Seconds since epoch of the last real sign-in (OTP or password+MFA), not token refresh. */
   authTime: number;
   ip: string | null;
@@ -43,12 +43,23 @@ async function load(req: CallableRequest, allowed: readonly Role[]): Promise<Act
   if (user.role !== claimRole) fail("permission-denied", "role_changed", "Your account changed. Sign out and back in.");
   if (user.status !== "active") fail("permission-denied", "account_locked", "This account is on hold. Talk to a Konduct agent or support.");
 
-  return { uid: req.auth.uid, role: claimRole, phone: (token.phone_number as string) ?? null, authTime: Number(token.auth_time ?? 0), ip: ipOf(req), user };
+  return { uid: req.auth.uid, role: claimRole, email: (token.email as string) ?? null, authTime: Number(token.auth_time ?? 0), ip: ipOf(req), user };
 }
 
-/** Riders and drivers: verified phone number required (SEC-AUTH-01). */
+/**
+ * Riders and drivers sign in with email + password (SEC-AUTH-01). Email addresses aren't
+ * verified yet, so nothing here trusts an email on its own: drivers prove who they are with
+ * the agent's one-time code, riders with a unique student ID.
+ */
+export function memberToken(req: CallableRequest): { uid: string; email: string; role: unknown } {
+  const t = req.auth?.token;
+  const provider = (t?.firebase as { sign_in_provider?: string } | undefined)?.sign_in_provider;
+  if (!req.auth || !t?.email || provider !== "password") fail("unauthenticated", "signed_out", "Sign in with your email and password first.");
+  return { uid: req.auth.uid, email: String(t.email).toLowerCase(), role: t.role };
+}
+
 export async function requireMember(req: CallableRequest, roles: readonly MemberRole[]): Promise<Actor> {
-  if (!req.auth?.token?.phone_number) fail("unauthenticated", "no_phone", "Sign in with your phone number first.");
+  memberToken(req);
   return load(req, roles);
 }
 
@@ -62,11 +73,11 @@ export async function requireStaff(req: CallableRequest, roles: readonly StaffRo
 
 /**
  * For actions that change where money can go (new bank account, new device): the person must
- * have completed an SMS code within [maxAgeSec] (re-authentication, FR-DRV-05, SEC-AUTH-03).
+ * have entered their password within [maxAgeSec] (re-authentication, FR-DRV-05, SEC-AUTH-03).
  */
 export function requireRecentSignIn(actor: Actor, maxAgeSec = 300) {
   if (Date.now() / 1000 - actor.authTime > maxAgeSec) {
-    fail("failed-precondition", "reauth_required", "For your safety, confirm it's you with a fresh SMS code first.");
+    fail("failed-precondition", "reauth_required", "For your safety, enter your password again first.");
   }
 }
 

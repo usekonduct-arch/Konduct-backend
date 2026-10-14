@@ -4,10 +4,10 @@
  */
 import { z } from "zod";
 
-import { CAMPUS_ID, PHONE_HASH_KEY, RULES } from "../config";
-import { cleanName, maskPhone, normalizeStudentId, phoneHash, studentIdKey } from "../identity";
+import { CAMPUS_ID, IDENTITY_KEY, RULES } from "../config";
+import { cleanName, codeHash, emailKey, maskEmail, normalizeStudentId, studentIdKey } from "../identity";
 import { audit } from "../lib/audit";
-import { randomCode } from "../lib/crypto";
+import { randomCode, safeEqual } from "../lib/crypto";
 import { auth, db, FieldValue, millis, stamp, touched } from "../lib/db";
 import { fail } from "../lib/errors";
 import { rateLimit } from "../lib/guards";
@@ -37,7 +37,7 @@ export const RegisterRider = z.strictObject({
  * FR-AUTH-01/02: profile + wallet + a claim on the student ID, in one transaction. A clash is
  * refused and flagged for review rather than silently merged.
  */
-export async function registerRider(uid: string, phone: string, existingRole: unknown, input: z.infer<typeof RegisterRider>) {
+export async function registerRider(uid: string, email: string, existingRole: unknown, input: z.infer<typeof RegisterRider>) {
   if (existingRole) fail("failed-precondition", "already_registered", "This number already has a Konduct account.");
   await rateLimit(uid, "register", 5, 3_600_000);
   const { fullName, studentId } = input;
@@ -64,8 +64,8 @@ export async function registerRider(uid: string, phone: string, existingRole: un
       status: "active",
       fullName,
       studentId,
-      phoneHash: phoneHash(phone, PHONE_HASH_KEY.value()),
-      phoneMasked: maskPhone(phone),
+      email,
+      emailMasked: maskEmail(email),
       kycTier: 1,
       pinSet: false,
       fundingCode: code,
@@ -87,48 +87,68 @@ export async function registerRider(uid: string, phone: string, existingRole: un
 }
 
 /**
- * FR-AUTH-03: links a signed-in phone to the invite an agent created at the park. Drivers can
- * never self-register; with no invite this returns { invited: false } and changes nothing.
+ * FR-AUTH-03: links a signed-in account to the invite an agent created at the park for this
+ * email. Emails aren't verified yet, so the email alone proves nothing: the driver must also
+ * give the one-time code the agent handed over. Five wrong codes lock the invite until an agent
+ * issues a new code. With no invite this returns { invited: false } and changes nothing.
  */
-export async function claimDriverAccount(uid: string, phone: string, existingRole: unknown) {
-  if (existingRole && existingRole !== "driver") fail("failed-precondition", "wrong_role", "This number is registered as a rider.");
+export async function claimDriverAccount(uid: string, email: string, existingRole: unknown, rawCode: string) {
+  if (existingRole && existingRole !== "driver") fail("failed-precondition", "wrong_role", "This is a student account.");
   await rateLimit(uid, "claim", 10, 3_600_000);
-  const inviteRef = db.doc(`driverInvites/${phone}`);
+  const code = rawCode.toUpperCase().replace(/[^0-9A-Z]/g, "");
+  if (!/^[0-9A-Z]{8}$/.test(code)) fail("invalid-argument", "bad_code", "Driver codes are 8 letters and numbers.");
+  const inviteRef = db.doc(`driverInvites/${emailKey(email)}`);
 
-  const result = await db.runTransaction(async (tx) => {
+  type Outcome = { kind: "none" } | { kind: "wrong"; left: number } | { kind: "ok"; d: FirebaseFirestore.DocumentData };
+  const result: Outcome = await db.runTransaction(async (tx) => {
     const invite = await tx.get(inviteRef);
-    if (!invite.exists || invite.get("status") === "revoked") return null;
-    if (invite.get("status") === "claimed" && invite.get("claimedBy") !== uid) {
-      fail("already-exists", "invite_claimed", "This driver record is linked to another sign-in. Talk to a Konduct agent.");
+    if (!invite.exists || invite.get("status") === "revoked") return { kind: "none" };
+    if (invite.get("status") === "claimed") {
+      if (invite.get("claimedBy") === uid) return { kind: "ok", d: invite.data()! };
+      fail("already-exists", "invite_claimed", "This driver record is already linked to another account. Talk to a Konduct agent.");
     }
+    if (invite.get("status") === "locked") fail("permission-denied", "invite_locked", "Too many wrong codes. Ask a Konduct agent for a new one.");
+
+    if (!safeEqual(codeHash(code, IDENTITY_KEY.value()), String(invite.get("codeHash")))) {
+      const attempts = (invite.get("attempts") ?? 0) + 1;
+      const locked = attempts >= RULES.inviteMaxAttempts;
+      tx.update(inviteRef, { attempts, status: locked ? "locked" : "pending", ...touched() });
+      if (locked) tx.create(db.collection("flags").doc(), { type: "driver_code_lockout", inviteId: inviteRef.id, uid, status: "open", ...stamp() });
+      return { kind: "wrong", left: RULES.inviteMaxAttempts - attempts };
+    }
+
     const d = invite.data()!;
-    if (invite.get("status") !== "claimed") {
-      const vehicle = await tx.get(db.doc(`vehicles/${d.vehicleId}`));
-      if (!vehicle.exists) throw new Error("invite points at a missing vehicle");
-      tx.set(db.doc(`users/${uid}`), {
-        role: "driver",
-        status: "active",
-        fullName: d.fullName,
-        phoneHash: phoneHash(phone, PHONE_HASH_KEY.value()),
-        phoneMasked: maskPhone(phone),
-        vehicleId: d.vehicleId,
-        onboardedBy: d.onboardedBy,
-        pinSet: false,
-        trustedDevices: [],
-        payoutAccountId: null,
-        ...stamp(),
-      });
-      openAccountWrite(tx, driverAccount(uid), "driver", uid);
-      tx.update(inviteRef, { status: "claimed", claimedBy: uid, claimedAt: FieldValue.serverTimestamp(), ...touched() });
-      tx.update(vehicle.ref, { driverUid: uid, ...touched() });
-      audit({ actor: uid, action: "driver.claim", target: `users/${uid}`, after: { vehicleId: d.vehicleId } }, tx);
-    }
-    return d;
+    const vehicle = await tx.get(db.doc(`vehicles/${d.vehicleId}`));
+    if (!vehicle.exists) throw new Error("invite points at a missing vehicle");
+    tx.set(db.doc(`users/${uid}`), {
+      role: "driver",
+      status: "active",
+      fullName: d.fullName,
+      email,
+      emailMasked: maskEmail(email),
+      contactPhone: d.contactPhone ?? null,
+      vehicleId: d.vehicleId,
+      onboardedBy: d.onboardedBy,
+      pinSet: false,
+      trustedDevices: [],
+      payoutAccountId: null,
+      ...stamp(),
+    });
+    openAccountWrite(tx, driverAccount(uid), "driver", uid);
+    tx.update(inviteRef, { status: "claimed", claimedBy: uid, claimedAt: FieldValue.serverTimestamp(), codeHash: null, ...touched() });
+    tx.update(vehicle.ref, { driverUid: uid, ...touched() });
+    audit({ actor: uid, action: "driver.claim", target: `users/${uid}`, after: { vehicleId: d.vehicleId } }, tx);
+    return { kind: "ok", d };
   });
 
-  if (!result) return { invited: false };
-  if (existingRole !== "driver") await mergeClaims(uid, { role: "driver", campus: CAMPUS_ID, name: result.fullName, status: "active", pin: false });
-  return { invited: true, fullName: result.fullName, plate: result.plate, vehicleType: result.vehicleType, route: result.routeName ?? "" };
+  if (result.kind === "none") return { invited: false };
+  if (result.kind === "wrong") {
+    if (result.left <= 0) fail("permission-denied", "invite_locked", "Too many wrong codes. Ask a Konduct agent for a new one.");
+    fail("permission-denied", "code_wrong", `That code doesn't match. ${result.left} ${result.left === 1 ? "try" : "tries"} left.`, { attemptsLeft: result.left });
+  }
+  const d = result.d;
+  if (existingRole !== "driver") await mergeClaims(uid, { role: "driver", campus: CAMPUS_ID, name: d.fullName, status: "active", pin: false });
+  return { invited: true, fullName: d.fullName, plate: d.plate, vehicleType: d.vehicleType, route: d.routeName ?? "" };
 }
 
 /** FR-AUTH-06: first PIN only. Changing a PIN needs a fresh SMS code + the old PIN (changePin). */

@@ -7,13 +7,15 @@ import { actorFor, balance, bachsCalls, keyOf, makeDriverWithVehicle, makeRider,
 import { beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
 
-import { db, stamp } from "./lib/db";
+import { auth, db, stamp } from "./lib/db";
 import { isHttpsError } from "./lib/errors";
 import { driverAccount, PLATFORM, riderAccount, verifyAccount } from "./ledger/ledger";
 import { confirmPayment, previewPayment, undoPayment } from "./domain/pay";
 import { createTopUp } from "./domain/funding";
 import { handleBachsWebhook } from "./bachs/webhook";
-import { setUserStatus, issueVehicleQr } from "./domain/staff";
+import { setUserStatus, issueVehicleQr, inviteDriver, resetDriverCode } from "./domain/staff";
+import { claimDriverAccount } from "./domain/accounts";
+import { memberToken } from "./lib/guards";
 import { decide } from "./domain/approvals";
 import { onPayoutEvent, payoutDriver, setPayoutAccount } from "./domain/payouts";
 import { openDispute, resolveDispute, reviewDispute } from "./domain/disputes";
@@ -337,7 +339,7 @@ describe("funding via Bachs", () => {
 });
 
 describe("driver payouts via Bachs Connect", () => {
-  test("bank account needs fresh SMS sign-in + PIN + a second person; then pays out once", async () => {
+  test("bank account needs a fresh password sign-in + PIN + a second person; then pays out once", async () => {
     const d = await makeDriverWithVehicle(20_000);
     const r = await makeRider(500_000);
     for (let i = 0; i < 4; i++) await pay(r, d.token, { repeat: true }); // driver earns ₦800
@@ -413,6 +415,97 @@ describe("driver payouts via Bachs Connect", () => {
     } finally {
       await db.doc("config/switches").set({ payoutsPaused: false });
     }
+  });
+});
+
+describe("driver onboarding by email + agent code", () => {
+  const agent = () => actorFor(uniq("agt"), "agent", { role: "agent", status: "active" });
+  const routeFor = async () => {
+    const id = uniq("route");
+    await db.doc(`routes/${id}`).set({ name: "Main Gate → Faculty", stops: ["Main Gate", "Faculty"], fareKobo: 20_000, fareVersion: 1, active: true, ...stamp() });
+    return id;
+  };
+  const invite = async (email: string) =>
+    inviteDriver(agent(), {
+      email,
+      fullName: "Tunde Adebayo",
+      plate: "OS 452 KJA",
+      type: "shuttle",
+      routeId: await routeFor(),
+      capacity: 14,
+      checks: { idSeen: true, vehiclePapersSeen: true, unionConfirmed: true },
+    });
+  const newUser = async (email: string) => {
+    const uid = uniq("usr");
+    await auth.createUser({ uid, email, password: "test-password-1" });
+    return uid;
+  };
+
+  test("the right code links the driver; the code is never stored", async () => {
+    const email = `${uniq("tunde").toLowerCase()}@gmail.com`;
+    const { onboardingCode, vehicleId } = await invite(email);
+    assert.match(onboardingCode, /^[0-9A-Z]{8}$/);
+    const stored = (await db.collection("driverInvites").where("email", "==", email).get()).docs[0].data();
+    assert.ok(!JSON.stringify(stored).includes(onboardingCode), "only a keyed hash is stored");
+    const uid = await newUser(email);
+    const out = await claimDriverAccount(uid, email, undefined, onboardingCode.toLowerCase());
+    assert.equal(out.invited, true);
+    assert.equal((await db.doc(`users/${uid}`).get()).get("role"), "driver");
+    assert.equal((await db.doc(`vehicles/${vehicleId}`).get()).get("driverUid"), uid);
+    assert.equal((await auth.getUser(uid)).customClaims?.role, "driver");
+  });
+
+  test("wrong codes count down, then lock the invite until an agent resets it", async () => {
+    const email = `${uniq("tunde").toLowerCase()}@gmail.com`;
+    const { onboardingCode } = await invite(email);
+    const uid = await newUser(email);
+    for (let left = 4; left >= 1; left--) {
+      const r = await claimDriverAccount(uid, email, undefined, "AAAAAAAA").catch((e) => e);
+      assert.equal((r.details as { reason: string }).reason, "code_wrong");
+      assert.equal((r.details as { attemptsLeft: number }).attemptsLeft, left);
+    }
+    assert.equal(await reason(claimDriverAccount(uid, email, undefined, "AAAAAAAA")), "invite_locked");
+    assert.equal(await reason(claimDriverAccount(uid, email, undefined, onboardingCode)), "invite_locked"); // even the right one
+    const fresh = await resetDriverCode(agent(), email);
+    assert.notEqual(fresh.onboardingCode, onboardingCode);
+    assert.equal(await reason(claimDriverAccount(uid, email, undefined, onboardingCode)), "code_wrong"); // the old code is dead
+    assert.equal((await claimDriverAccount(uid, email, undefined, fresh.onboardingCode)).invited, true);
+  });
+
+  test("a claimed invite can't be taken over by another account", async () => {
+    const email = `${uniq("tunde").toLowerCase()}@gmail.com`;
+    const { onboardingCode } = await invite(email);
+    const owner = await newUser(email);
+    await claimDriverAccount(owner, email, undefined, onboardingCode);
+    const intruder = uniq("usr"); // e.g. the same email re-registered after the owner's account was deleted
+    assert.equal(await reason(claimDriverAccount(intruder, email, undefined, onboardingCode)), "invite_claimed");
+    assert.equal(await reason(resetDriverCode(agent(), email)), "invite_claimed");
+  });
+
+  test("an email no agent registered changes nothing", async () => {
+    const uid = await newUser(`${uniq("nobody").toLowerCase()}@gmail.com`);
+    const out = await claimDriverAccount(uid, "nobody-here@gmail.com", undefined, "KD7F3Q2X");
+    assert.deepEqual(out, { invited: false });
+    assert.equal((await db.doc(`users/${uid}`).get()).exists, false);
+  });
+
+  test("a student account can't claim a driver invite", async () => {
+    const email = `${uniq("tunde").toLowerCase()}@gmail.com`;
+    const { onboardingCode } = await invite(email);
+    assert.equal(await reason(claimDriverAccount(uniq("usr"), email, "rider", onboardingCode)), "wrong_role");
+  });
+
+  test("members must sign in with email + password", () => {
+    const req = (token: Record<string, unknown>) => ({ auth: { uid: "u1", token } }) as never;
+    assert.equal(memberToken(req({ email: "Ada@X.com", firebase: { sign_in_provider: "password" } })).email, "ada@x.com");
+    for (const token of [
+      { phone_number: "+2348030000000", firebase: { sign_in_provider: "phone" } },
+      { firebase: { sign_in_provider: "anonymous" } },
+      { email: "ada@x.com", firebase: { sign_in_provider: "custom" } },
+    ]) {
+      assert.throws(() => memberToken(req(token)), /Sign in with your email/);
+    }
+    assert.throws(() => memberToken({ auth: undefined } as never), /Sign in with your email/);
   });
 });
 

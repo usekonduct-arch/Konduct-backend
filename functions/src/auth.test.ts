@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { maskPhone, normalizeStudentId, studentIdKey } from "./identity";
+import { codeHash, emailKey, maskEmail, normalizeStudentId, studentIdKey } from "./identity";
 import { hashPin, isPinShape, isWeakPin, verifyPin } from "./pin";
 
 test("student IDs typed differently collapse to one key", () => {
@@ -26,6 +26,15 @@ test("PIN hashes verify, use a fresh salt, and reject wrong PINs", async () => {
   assert.ok(!(await verifyPin("2581", a)));
 });
 
-test("phones are masked for admin lists", () => {
-  assert.equal(maskPhone("+2348031234567"), "+234 803 *** 4567");
+test("emails are keyed case-insensitively and masked for admin lists", () => {
+  assert.equal(emailKey(" Tunde@Gmail.com "), emailKey("tunde@gmail.com"));
+  assert.notEqual(emailKey("tunde@gmail.com"), emailKey("tunde2@gmail.com"));
+  assert.equal(maskEmail("Adaeze.Okafor@uniosun.edu.ng"), "ad***@uniosun.edu.ng");
+  assert.equal(maskEmail("not-an-email"), "***");
+});
+
+test("onboarding codes are stored as keyed hashes, case-insensitively", () => {
+  assert.equal(codeHash("kd7f3q2x", "k"), codeHash("KD7F3Q2X", "k"));
+  assert.notEqual(codeHash("KD7F3Q2X", "k"), codeHash("KD7F3Q2X", "other-key"));
+  assert.ok(!codeHash("KD7F3Q2X", "k").includes("KD7F3Q2X"));
 });

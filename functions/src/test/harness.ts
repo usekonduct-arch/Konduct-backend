@@ -6,7 +6,7 @@ import { createHmac } from "node:crypto";
 
 Object.assign(process.env, {
   GCLOUD_PROJECT: process.env.GCLOUD_PROJECT ?? "demo-konduct",
-  PHONE_HASH_KEY: "test-phone-key",
+  IDENTITY_KEY: "test-identity-key",
   QR_SIGNING_KEY: "test-qr-key",
   OFFLINE_CODE_KEY: "test-offline-key",
   BACHS_API_KEY: "sk_sandbox_test",
@@ -54,13 +54,13 @@ let n = 0;
 export const uniq = (p: string) => `${p}${Date.now().toString(36)}${(n++).toString(36)}`.replace(/[^A-Za-z0-9]/g, "").padEnd(12, "0");
 
 export function actorFor(uid: string, role: Role, user: Record<string, unknown>, authTime = Math.floor(Date.now() / 1000)): Actor {
-  return { uid, role, phone: "+2348030000000", authTime, ip: "203.0.113.9", user };
+  return { uid, role, email: `${uid}@konduct.test`, authTime, ip: "203.0.113.9", user };
 }
 
 export async function makeRider(balanceKobo = 0, extra: Record<string, unknown> = {}) {
   const uid = uniq("rdr");
-  const phone = `+23480${String(Math.floor(Math.random() * 1e8)).padStart(8, "0")}`;
-  await auth.createUser({ uid, phoneNumber: phone });
+  const email = `${uid.toLowerCase()}@konduct.test`;
+  await auth.createUser({ uid, email, password: "test-password-1" });
   await auth.setCustomUserClaims(uid, { role: "rider", pin: true, status: "active" });
   const user = { role: "rider", status: "active", fullName: "Ada Okafor", kycTier: 1, pinSet: true, ...extra };
   await db.runTransaction(async (tx) => {
@@ -68,7 +68,7 @@ export async function makeRider(balanceKobo = 0, extra: Record<string, unknown> 
     openAccountWrite(tx, riderAccount(uid), "rider", uid);
   });
   if (balanceKobo) await fund(uid, balanceKobo);
-  return { uid, phone, actor: actorFor(uid, "rider", user) };
+  return { uid, email, actor: actorFor(uid, "rider", user) };
 }
 
 export async function fund(uid: string, kobo: number) {
@@ -87,7 +87,7 @@ export async function fund(uid: string, kobo: number) {
 
 export async function makeDriverWithVehicle(fareKobo = 20_000) {
   const uid = uniq("drv");
-  await auth.createUser({ uid, phoneNumber: `+23481${String(Math.floor(Math.random() * 1e8)).padStart(8, "0")}` });
+  await auth.createUser({ uid, email: `${uid.toLowerCase()}@konduct.test`, password: "test-password-1" });
   await auth.setCustomUserClaims(uid, { role: "driver", pin: true, status: "active" });
   const routeId = uniq("route");
   const vehicleId = uniq("veh");

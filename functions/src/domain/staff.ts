@@ -4,13 +4,13 @@
  */
 import { z } from "zod";
 
-import { QR_SIGNING_KEY } from "../config";
+import { IDENTITY_KEY, QR_SIGNING_KEY } from "../config";
 import { audit } from "../lib/audit";
 import { randomCode } from "../lib/crypto";
 import { auth, db, stamp, touched } from "../lib/db";
 import { fail } from "../lib/errors";
 import type { Actor } from "../lib/guards";
-import { cleanName } from "../identity";
+import { cleanName, codeHash, emailKey, maskEmail, normalizeEmail } from "../identity";
 import { mergeClaims } from "./accounts";
 import { requestApproval } from "./approvals";
 import { makeVehicleToken } from "./qr";
@@ -29,7 +29,8 @@ const e164 = z
 /* ------------------------------------------------------------- drivers */
 
 export const InviteDriver = z.strictObject({
-  phone: e164,
+  email: z.string().max(120).transform(normalizeEmail).pipe(z.string().regex(/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/, "Enter a valid email.")),
+  contactPhone: e164.optional(),
   fullName: z.string().max(80).transform(cleanName).pipe(z.string().regex(/^[\p{L}'.-]+(\s[\p{L}'.-]+)+$/u)),
   plate: z.string().max(16).transform((s) => s.trim().toUpperCase()).pipe(z.string().regex(/^[A-Z0-9 -]{5,16}$/)),
   type: z.enum(["shuttle", "bike"]),
@@ -38,13 +39,18 @@ export const InviteDriver = z.strictObject({
   checks: z.strictObject({ idSeen: z.literal(true), vehiclePapersSeen: z.literal(true), unionConfirmed: z.literal(true) }),
 });
 
-/** FR-AUTH-03: an agent onboards a driver at the park after checking ID, papers and union. */
+/**
+ * FR-AUTH-03: an agent onboards a driver at the park after checking ID, papers and union. The
+ * returned onboarding code is shown to the agent once, handed to the driver in person, and
+ * stored only as a keyed hash.
+ */
 export async function inviteDriver(actor: Actor, input: z.infer<typeof InviteDriver>) {
-  const inviteRef = db.doc(`driverInvites/${input.phone}`);
+  const inviteRef = db.doc(`driverInvites/${emailKey(input.email)}`);
+  const onboardingCode = randomCode(8);
   const vehicleRef = db.collection("vehicles").doc();
   await db.runTransaction(async (tx) => {
     const [existing, route] = await tx.getAll(inviteRef, db.doc(`routes/${input.routeId}`));
-    if (existing.exists && existing.get("status") !== "revoked") fail("already-exists", "invite_exists", "This number already has a driver record.");
+    if (existing.exists && existing.get("status") !== "revoked") fail("already-exists", "invite_exists", "This email already has a driver record.");
     if (!route.exists) fail("not-found", "no_route", "Unknown route.");
     tx.set(vehicleRef, {
       plate: input.plate,
@@ -60,7 +66,11 @@ export async function inviteDriver(actor: Actor, input: z.infer<typeof InviteDri
       ...stamp(),
     });
     tx.set(inviteRef, {
-      phone: input.phone,
+      email: input.email,
+      emailMasked: maskEmail(input.email),
+      contactPhone: input.contactPhone ?? null,
+      codeHash: codeHash(onboardingCode, IDENTITY_KEY.value()),
+      attempts: 0,
       fullName: input.fullName,
       vehicleId: vehicleRef.id,
       plate: input.plate,
@@ -73,7 +83,21 @@ export async function inviteDriver(actor: Actor, input: z.infer<typeof InviteDri
     });
     audit({ actor: actor.uid, action: "driver.invite", target: inviteRef.path, after: { plate: input.plate, vehicleId: vehicleRef.id }, ip: actor.ip }, tx);
   });
-  return { vehicleId: vehicleRef.id };
+  return { vehicleId: vehicleRef.id, onboardingCode };
+}
+
+/** A fresh onboarding code for a driver who lost theirs or locked the invite with wrong tries. */
+export async function resetDriverCode(actor: Actor, email: string) {
+  const inviteRef = db.doc(`driverInvites/${emailKey(email)}`);
+  const onboardingCode = randomCode(8);
+  await db.runTransaction(async (tx) => {
+    const invite = await tx.get(inviteRef);
+    if (!invite.exists || invite.get("status") === "revoked") fail("not-found", "no_invite", "No driver record for that email.");
+    if (invite.get("status") === "claimed") fail("failed-precondition", "invite_claimed", "This driver has already linked their account.");
+    tx.update(inviteRef, { codeHash: codeHash(onboardingCode, IDENTITY_KEY.value()), attempts: 0, status: "pending", ...touched() });
+    audit({ actor: actor.uid, action: "driver.code.reset", target: inviteRef.path, before: { status: invite.get("status") }, after: { status: "pending" }, ip: actor.ip }, tx);
+  });
+  return { onboardingCode };
 }
 
 /** FR-DRV-08 / SEC-QR-04: issue (or re-issue) a sticker. The old one dies immediately. */

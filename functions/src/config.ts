@@ -12,8 +12,8 @@ export const SCHEMA_VERSION = 1;
  * Set each once with `firebase functions:secrets:set NAME`.
  */
 
-/** Keyed hash for phone numbers stored in Firestore (SRS 5: "phone (hashed index)"). */
-export const PHONE_HASH_KEY = defineSecret("PHONE_HASH_KEY");
+/** Keyed hash for identity secrets we must check but never store, such as driver onboarding codes. */
+export const IDENTITY_KEY = defineSecret("IDENTITY_KEY");
 /** Signs vehicle QR tokens (SEC-QR-01). Rotating it invalidates every printed sticker. */
 export const QR_SIGNING_KEY = defineSecret("QR_SIGNING_KEY");
 /** Derives the 6-character offline payment codes (FR-OFF-01). */
@@ -72,6 +72,8 @@ export const RULES = {
   pinLockMs: 30 * 60_000,
   /** Payments above this count in 10 minutes trigger a hold (SEC-PAY-05). */
   velocityMaxPays10Min: 8,
+  /** Wrong driver onboarding codes before the invite locks and an agent must issue a new one. */
+  inviteMaxAttempts: 5,
   /** Dispute review deadline (FR-DSP-02). */
   disputeSlaMs: 72 * 3_600_000,
   /** An offline code is valid this long for the driver to enter (FR-OFF-01). */
