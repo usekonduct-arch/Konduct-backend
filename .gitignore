@@ -1,0 +1,10 @@
+node_modules
+functions/lib
+functions/.env.local
+functions/.secret.local
+*.log
+service-account*.json
+.firebase/
+functions/.env*
+.runtimeconfig.json
+*.tsbuildinfo

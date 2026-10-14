@@ -1,0 +1,112 @@
+rules_version = '2';
+
+// Default deny (SEC-AUTH-02). The server is the only writer of money, roles, identity and trips
+// (SRS 3.2). Clients may read only their own records (SEC-AUTH-05, no BOLA), and the one write a
+// client can make is marking its own notification as read.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function me() {
+      return request.auth.uid;
+    }
+
+    // Staff console reads: staff claim, completed MFA, a reading role, and a live profile that is
+    // active and holds that same role (claims can lag; the profile can't).
+    function staffReader() {
+      let profile = get(/databases/$(database)/documents/users/$(me())).data;
+      return signedIn()
+        && request.auth.token.staff == true
+        && request.auth.token.firebase.sign_in_second_factor != null
+        && request.auth.token.role in ['admin', 'ops', 'support', 'auditor']
+        && profile.status == 'active'
+        && profile.role == request.auth.token.role;
+    }
+
+    function auditor() {
+      return staffReader() && request.auth.token.role in ['admin', 'auditor'];
+    }
+
+    match /users/{uid} {
+      allow read: if (signedIn() && me() == uid) || staffReader();
+
+      match /notifications/{id} {
+        allow read: if signedIn() && me() == uid;
+        allow update: if signedIn() && me() == uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read'])
+          && request.resource.data.read is bool;
+      }
+    }
+
+    // Balances: your own wallet only.
+    match /wallets/{accountId} {
+      allow read: if (signedIn() && resource.data.ownerUid == me()) || staffReader();
+    }
+
+    // Rider receipts (they include the offline code, so the payer only).
+    match /transactions/{txId} {
+      allow read: if (signedIn() && resource.data.payerUid == me()) || staffReader();
+    }
+
+    match /trips/{tripId} {
+      allow read: if (signedIn() && resource.data.riderUid == me()) || staffReader();
+    }
+
+    // The driver's live payment alerts (FR-PAY-05).
+    match /driverFeed/{driverUid}/items/{txId} {
+      allow read: if signedIn() && me() == driverUid;
+    }
+
+    match /topups/{id} {
+      allow read: if signedIn() && resource.data.uid == me();
+    }
+
+    match /payouts/{id} {
+      allow read: if (signedIn() && resource.data.uid == me()) || staffReader();
+    }
+
+    match /payoutAccounts/{id} {
+      allow read: if (signedIn() && resource.data.uid == me()) || staffReader();
+    }
+
+    match /disputes/{id} {
+      allow read: if (signedIn() && resource.data.payerUid == me()) || staffReader();
+    }
+
+    match /vehicles/{vehicleId} {
+      allow read: if (signedIn() && resource.data.driverUid == me()) || staffReader();
+    }
+
+    match /routes/{routeId} {
+      allow read: if signedIn();
+      match /fares/{version} {
+        allow read: if staffReader();
+      }
+    }
+
+    // So the apps can say "payments are paused" before anyone scans.
+    match /config/switches {
+      allow read: if signedIn();
+    }
+
+    // Operations queues: staff only.
+    match /deposits/{id} { allow read: if staffReader(); }
+    match /flags/{id} { allow read: if staffReader(); }
+    match /approvals/{id} { allow read: if staffReader(); }
+    match /reconReports/{id} { allow read: if staffReader(); }
+    match /alerts/{id} { allow read: if staffReader(); }
+    match /driverInvites/{id} { allow read: if staffReader(); }
+
+    // Books and evidence: admin and finance auditor only (FR-ADM-06).
+    match /ledgerEntries/{id} { allow read: if auditor(); }
+    match /ledgerTx/{id} { allow read: if auditor(); }
+    match /auditLogs/{id} { allow read: if auditor(); }
+    match /webhookEvents/{id} { allow read: if auditor(); }
+
+    // Everything else (pins, studentIds, fundingCodes, payerAccounts, payQuotes, idempotency,
+    // rateLimits, dailyTotals, connectAccounts, devices, ...) has no rule and is denied.
+  }
+}

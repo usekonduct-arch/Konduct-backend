@@ -1,0 +1,45 @@
+import { logger } from "firebase-functions";
+import { type CallableRequest, HttpsError, onCall } from "firebase-functions/v2/https";
+import type { SecretParam } from "firebase-functions/params";
+import { z } from "zod";
+
+import { ENFORCE_APP_CHECK, REGION } from "../config";
+
+type Opts = { secrets?: SecretParam[]; minInstances?: number; memory?: "256MiB" | "512MiB" | "1GiB"; timeoutSeconds?: number };
+
+/**
+ * Every app-facing endpoint goes through here (SEC-APP-02/03):
+ * - App Check token required when enforced; token replay protection on money endpoints
+ * - input parsed with a strict schema (unknown fields rejected)
+ * - unexpected errors become a generic "internal" so stack traces and internals never leak
+ */
+export function callable<S extends z.ZodType, R>(schema: S, handler: (req: CallableRequest, data: z.infer<S>) => Promise<R>, opts: Opts = {}) {
+  return onCall(
+    {
+      region: REGION,
+      enforceAppCheck: ENFORCE_APP_CHECK,
+      cors: false, // mobile apps only; the admin console gets its own origin list when built
+      secrets: opts.secrets ?? [],
+      minInstances: opts.minInstances ?? 0,
+      memory: opts.memory ?? "256MiB",
+      timeoutSeconds: opts.timeoutSeconds ?? 30,
+      maxInstances: 50,
+    },
+    async (req) => {
+      const parsed = schema.safeParse(req.data ?? {});
+      if (!parsed.success) {
+        const issue = parsed.error.issues[0];
+        throw new HttpsError("invalid-argument", issue?.message?.length && issue.message.length < 120 ? issue.message : "Check your details and try again.", { reason: "invalid_input" });
+      }
+      try {
+        return await handler(req, parsed.data);
+      } catch (e) {
+        if (e instanceof HttpsError) throw e;
+        logger.error("unhandled error", { fn: req.rawRequest?.path, err: (e as Error).message, stack: (e as Error).stack?.split("\n").slice(0, 4).join(" | ") });
+        throw new HttpsError("internal", "Something went wrong on our side. Nothing was charged twice; try again.", { reason: "internal" });
+      }
+    },
+  );
+}
+
+export const Empty = z.strictObject({});

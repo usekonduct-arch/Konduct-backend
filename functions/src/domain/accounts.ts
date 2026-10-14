@@ -1,0 +1,195 @@
+/**
+ * Sign-up and PIN (FR-AUTH-01..06, FR-AUTH-09). Roles and progress live in custom claims that
+ * only this code sets (FR-AUTH-05); Firestore profiles are the source of truth for status.
+ */
+import { z } from "zod";
+
+import { CAMPUS_ID, PHONE_HASH_KEY, RULES } from "../config";
+import { cleanName, maskPhone, normalizeStudentId, phoneHash, studentIdKey } from "../identity";
+import { audit } from "../lib/audit";
+import { randomCode } from "../lib/crypto";
+import { auth, db, FieldValue, millis, stamp, touched } from "../lib/db";
+import { fail } from "../lib/errors";
+import { rateLimit } from "../lib/guards";
+import { driverAccount, openAccountWrite, riderAccount } from "../ledger/ledger";
+import { hashPin, isPinShape, isWeakPin, verifyPin } from "../pin";
+
+/** Merges into existing custom claims; claims are the app's offline view of role and progress. */
+export async function mergeClaims(uid: string, patch: Record<string, unknown>) {
+  const current = (await auth.getUser(uid)).customClaims ?? {};
+  await auth.setCustomUserClaims(uid, { ...current, ...patch });
+}
+
+export const RegisterRider = z.strictObject({
+  fullName: z
+    .string()
+    .max(120)
+    .transform(cleanName)
+    .pipe(z.string().min(3, "Enter your full name.").max(80, "That name is too long.").regex(/^[\p{L}'.-]+(\s[\p{L}'.-]+)+$/u, "Enter your first and last name.")),
+  studentId: z
+    .string()
+    .max(40)
+    .transform(normalizeStudentId)
+    .pipe(z.string().min(4, "Enter your student ID.").max(24, "That student ID is too long.").regex(/^[A-Z0-9-]+$/, "Student IDs use letters, numbers and slashes only.")),
+});
+
+/**
+ * FR-AUTH-01/02: profile + wallet + a claim on the student ID, in one transaction. A clash is
+ * refused and flagged for review rather than silently merged.
+ */
+export async function registerRider(uid: string, phone: string, existingRole: unknown, input: z.infer<typeof RegisterRider>) {
+  if (existingRole) fail("failed-precondition", "already_registered", "This number already has a Konduct account.");
+  await rateLimit(uid, "register", 5, 3_600_000);
+  const { fullName, studentId } = input;
+  const idRef = db.doc(`studentIds/${studentIdKey(CAMPUS_ID, studentId)}`);
+  const userRef = db.doc(`users/${uid}`);
+
+  const result = await db.runTransaction(async (tx) => {
+    const [held, existing] = await tx.getAll(idRef, userRef);
+    if (existing.exists) return { clash: null, code: existing.get("fundingCode") as string };
+    if (held.exists && held.get("uid") !== uid) return { clash: held.get("uid") as string, code: null };
+
+    // A personal code riders put in their transfer narration so deposits find them.
+    let code = "";
+    for (let i = 0; i < 5 && !code; i++) {
+      const c = `KD${randomCode(6)}`;
+      if (!(await tx.get(db.doc(`fundingCodes/${c}`))).exists) code = c;
+    }
+    if (!code) throw new Error("could not allocate a funding code");
+
+    tx.set(idRef, { uid, studentId, ...stamp() });
+    tx.set(db.doc(`fundingCodes/${code}`), { uid, ...stamp() });
+    tx.set(userRef, {
+      role: "rider",
+      status: "active",
+      fullName,
+      studentId,
+      phoneHash: phoneHash(phone, PHONE_HASH_KEY.value()),
+      phoneMasked: maskPhone(phone),
+      kycTier: 1,
+      pinSet: false,
+      fundingCode: code,
+      trustedDevices: [],
+      allowOthersToPay: true,
+      ...stamp(),
+    });
+    openAccountWrite(tx, riderAccount(uid), "rider", uid);
+    audit({ actor: uid, action: "rider.register", target: userRef.path, after: { studentId } }, tx);
+    return { clash: null, code };
+  });
+
+  if (result.clash) {
+    await db.collection("flags").add({ type: "duplicate_student_id", studentId, uid, heldBy: result.clash, status: "open", ...stamp() });
+    fail("already-exists", "student_id_taken", "That student ID is already on another account. If it's yours, talk to a Konduct agent at the park.");
+  }
+  await mergeClaims(uid, { role: "rider", campus: CAMPUS_ID, name: fullName, status: "active", pin: false });
+  return { ok: true, fundingCode: result.code };
+}
+
+/**
+ * FR-AUTH-03: links a signed-in phone to the invite an agent created at the park. Drivers can
+ * never self-register; with no invite this returns { invited: false } and changes nothing.
+ */
+export async function claimDriverAccount(uid: string, phone: string, existingRole: unknown) {
+  if (existingRole && existingRole !== "driver") fail("failed-precondition", "wrong_role", "This number is registered as a rider.");
+  await rateLimit(uid, "claim", 10, 3_600_000);
+  const inviteRef = db.doc(`driverInvites/${phone}`);
+
+  const result = await db.runTransaction(async (tx) => {
+    const invite = await tx.get(inviteRef);
+    if (!invite.exists || invite.get("status") === "revoked") return null;
+    if (invite.get("status") === "claimed" && invite.get("claimedBy") !== uid) {
+      fail("already-exists", "invite_claimed", "This driver record is linked to another sign-in. Talk to a Konduct agent.");
+    }
+    const d = invite.data()!;
+    if (invite.get("status") !== "claimed") {
+      const vehicle = await tx.get(db.doc(`vehicles/${d.vehicleId}`));
+      if (!vehicle.exists) throw new Error("invite points at a missing vehicle");
+      tx.set(db.doc(`users/${uid}`), {
+        role: "driver",
+        status: "active",
+        fullName: d.fullName,
+        phoneHash: phoneHash(phone, PHONE_HASH_KEY.value()),
+        phoneMasked: maskPhone(phone),
+        vehicleId: d.vehicleId,
+        onboardedBy: d.onboardedBy,
+        pinSet: false,
+        trustedDevices: [],
+        payoutAccountId: null,
+        ...stamp(),
+      });
+      openAccountWrite(tx, driverAccount(uid), "driver", uid);
+      tx.update(inviteRef, { status: "claimed", claimedBy: uid, claimedAt: FieldValue.serverTimestamp(), ...touched() });
+      tx.update(vehicle.ref, { driverUid: uid, ...touched() });
+      audit({ actor: uid, action: "driver.claim", target: `users/${uid}`, after: { vehicleId: d.vehicleId } }, tx);
+    }
+    return d;
+  });
+
+  if (!result) return { invited: false };
+  if (existingRole !== "driver") await mergeClaims(uid, { role: "driver", campus: CAMPUS_ID, name: result.fullName, status: "active", pin: false });
+  return { invited: true, fullName: result.fullName, plate: result.plate, vehicleType: result.vehicleType, route: result.routeName ?? "" };
+}
+
+/** FR-AUTH-06: first PIN only. Changing a PIN needs a fresh SMS code + the old PIN (changePin). */
+export async function setTransactionPin(uid: string, pin: string) {
+  assertGoodPin(pin);
+  await rateLimit(uid, "pinset", 5, 3_600_000);
+  const pinRef = db.doc(`pins/${uid}`);
+  const hashed = await hashPin(pin);
+  await db.runTransaction(async (tx) => {
+    if ((await tx.get(pinRef)).exists) fail("already-exists", "pin_exists", "You already have a PIN.");
+    tx.set(pinRef, { ...hashed, length: pin.length, failedAttempts: 0, lockedUntil: 0, ...stamp() });
+    tx.update(db.doc(`users/${uid}`), { pinSet: true, ...touched() });
+    audit({ actor: uid, action: "pin.set", target: `users/${uid}`, after: { length: pin.length } }, tx);
+  });
+  await mergeClaims(uid, { pin: true });
+  return { ok: true };
+}
+
+export async function changePin(uid: string, oldPin: string, newPin: string) {
+  assertGoodPin(newPin);
+  await checkPin(uid, oldPin);
+  const hashed = await hashPin(newPin);
+  await db.runTransaction(async (tx) => {
+    tx.update(db.doc(`pins/${uid}`), { ...hashed, length: newPin.length, failedAttempts: 0, lockedUntil: 0, ...touched() });
+    audit({ actor: uid, action: "pin.change", target: `users/${uid}` }, tx);
+  });
+  return { ok: true };
+}
+
+function assertGoodPin(pin: string) {
+  if (!isPinShape(pin)) fail("invalid-argument", "pin_shape", "Your PIN must be 4 or 6 digits.");
+  if (isWeakPin(pin)) fail("invalid-argument", "pin_weak", "That PIN is too easy to guess. Avoid repeats and runs like 1234.");
+}
+
+/**
+ * Verifies a transaction PIN with lockout: 5 wrong tries locks PIN use for 30 minutes and
+ * raises a security flag. A burst limit stops parallel guessing racing the counter.
+ */
+export async function checkPin(uid: string, pin: unknown): Promise<void> {
+  if (typeof pin !== "string" || !isPinShape(pin)) fail("invalid-argument", "pin_required", "Enter your PIN to confirm.", { needsPin: true });
+  await rateLimit(uid, "pincheck", 6, 60_000);
+  const ref = db.doc(`pins/${uid}`);
+  const snap = await ref.get();
+  if (!snap.exists) fail("failed-precondition", "no_pin", "Set a PIN first.");
+  const lockedUntil = millis(snap.get("lockedUntil"));
+  if (lockedUntil > Date.now()) fail("permission-denied", "pin_locked", "Too many wrong PINs. Try again in a little while.", { retryAfterMs: lockedUntil - Date.now() });
+
+  const good = await verifyPin(pin, { hash: snap.get("hash"), salt: snap.get("salt") });
+  if (good) {
+    if (snap.get("failedAttempts")) await ref.update({ failedAttempts: 0, ...touched() });
+    return;
+  }
+  const attempts = await db.runTransaction(async (tx) => {
+    const s = await tx.get(ref);
+    const n = (s.get("failedAttempts") ?? 0) + 1;
+    const lock = n >= RULES.pinMaxAttempts;
+    tx.update(ref, { failedAttempts: lock ? 0 : n, lockedUntil: lock ? Date.now() + RULES.pinLockMs : 0, ...touched() });
+    if (lock) tx.create(db.collection("flags").doc(), { type: "pin_lockout", uid, status: "open", ...stamp() });
+    return n;
+  });
+  const left = RULES.pinMaxAttempts - attempts;
+  if (left <= 0) fail("permission-denied", "pin_locked", "Too many wrong PINs. PIN payments are paused for 30 minutes.");
+  fail("permission-denied", "pin_wrong", `Wrong PIN. ${left} ${left === 1 ? "try" : "tries"} left.`, { attemptsLeft: left });
+}
