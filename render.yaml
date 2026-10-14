@@ -10,9 +10,9 @@ services:
     healthCheckPath: /healthz
     autoDeployTrigger: commit
     envVars:
-      # Upload the Firebase service-account key as a Secret File named service-account.json.
-      - key: GOOGLE_APPLICATION_CREDENTIALS
-        value: /etc/secrets/service-account.json
+      # The Firebase service-account key: paste the whole downloaded JSON file as the value.
+      - key: FIREBASE_SERVICE_ACCOUNT
+        sync: false
       - key: ENFORCE_APP_CHECK
         value: "false"
       - key: TOPUP_RETURN_URL

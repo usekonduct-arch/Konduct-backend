@@ -112,7 +112,8 @@ and build the apps without `BACKEND_URL`.
    `firebase deploy --only firestore:rules,firestore:indexes --project <id>` (no functions).
 2. **Service account**: Project settings → Service accounts → *Generate new private key*. Never commit it.
 3. **Render**: New → Blueprint → this repo (`render.yaml`). Then:
-   - Add the key as a **Secret File** named `service-account.json`.
+   - Paste the whole key file as the value of `FIREBASE_SERVICE_ACCOUNT`. (A Secret File named by
+     `GOOGLE_APPLICATION_CREDENTIALS` also works, if it is attached to this service.)
    - Fill in the secrets it asks for (same as the table above). Keep `JOBS_SECRET`, which Render generates.
 4. **Bachs webhook URL**: `https://<service>.onrender.com/bachsWebhook`.
 5. **Apps**: build both with `--dart-define=BACKEND_URL=https://<service>.onrender.com`.

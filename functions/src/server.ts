@@ -10,7 +10,7 @@
  *  GET  /healthz
  *
  * Secrets and params come from environment variables of the same names. Firestore credentials:
- * GOOGLE_APPLICATION_CREDENTIALS pointing at a service-account key (a Render secret file).
+ * FIREBASE_SERVICE_ACCOUNT holding the service-account key JSON, or GOOGLE_APPLICATION_CREDENTIALS naming a key file.
  */
 import express, { type NextFunction, type Response } from "express";
 import { logger } from "firebase-functions";
@@ -26,7 +26,6 @@ import { JOBS } from "./jobs";
 import * as endpoints from "./index";
 
 const REQUIRED_ENV = [
-  "GOOGLE_APPLICATION_CREDENTIALS",
   "IDENTITY_KEY",
   "QR_SIGNING_KEY",
   "OFFLINE_CODE_KEY",
@@ -38,6 +37,8 @@ const REQUIRED_ENV = [
   "JOBS_SECRET",
 ];
 const missing = REQUIRED_ENV.filter((k) => !process.env[k]);
+// The Firebase key: inline JSON, or a secret file.
+if (!process.env.FIREBASE_SERVICE_ACCOUNT && !process.env.GOOGLE_APPLICATION_CREDENTIALS) missing.unshift("FIREBASE_SERVICE_ACCOUNT");
 if (missing.length) {
   logger.error("missing environment variables; refusing to start", { missing });
   process.exit(1);

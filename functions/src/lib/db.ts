@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { cert, getApps, initializeApp, type AppOptions } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { FieldValue, getFirestore, Timestamp, type Firestore } from "firebase-admin/firestore";
@@ -6,27 +7,43 @@ import { FieldValue, getFirestore, Timestamp, type Firestore } from "firebase-ad
 import { CAMPUS_ID, SCHEMA_VERSION } from "../config";
 
 /**
- * On Render the service-account key is a secret file named by GOOGLE_APPLICATION_CREDENTIALS. Read it up front,
- * so a missing, unreadable or malformed file stops the server with the reason instead of failing every sign-in.
- * Cloud Functions has no such variable and uses its own credentials.
+ * On Render the service-account key comes from FIREBASE_SERVICE_ACCOUNT (the key's JSON as an environment
+ * variable) or a secret file named by GOOGLE_APPLICATION_CREDENTIALS. It is read up front, so a missing or
+ * malformed key stops the server with the reason instead of failing every sign-in.
+ * Cloud Functions sets neither and uses its own credentials.
  */
 function credentialOptions(): AppOptions | undefined {
+  const inline = process.env.FIREBASE_SERVICE_ACCOUNT;
   const path = process.env.GOOGLE_APPLICATION_CREDENTIALS;
-  if (!path) return undefined;
-  let text: string;
-  try {
-    text = readFileSync(path, "utf8");
-  } catch (e) {
-    throw new Error(`cannot read service-account key at ${path} (${(e as NodeJS.ErrnoException).code})`);
+  if (inline) {
+    // Keep Google libraries from looking for a key file that may not exist.
+    delete process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    return fromJson(inline, "FIREBASE_SERVICE_ACCOUNT");
   }
+  if (!path) return undefined;
+  try {
+    return fromJson(readFileSync(path, "utf8"), path);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (!code) throw e;
+    // Names only, never contents: shows whether the secret file was mounted under another name.
+    let present = "nothing";
+    try {
+      present = readdirSync(dirname(path)).join(", ") || "nothing";
+    } catch {}
+    throw new Error(`cannot read service-account key at ${path} (${code}); ${dirname(path)} holds: ${present}`);
+  }
+}
+
+function fromJson(text: string, source: string): AppOptions {
   let key: { project_id?: string; client_email?: string; private_key?: string };
   try {
     key = JSON.parse(text);
   } catch {
-    // Don't echo the parse error: it quotes the file, which holds the private key.
-    throw new Error(`service-account key at ${path} is not valid JSON`);
+    // Don't echo the parse error: it quotes the input, which holds the private key.
+    throw new Error(`service-account key in ${source} is not valid JSON`);
   }
-  if (!key.project_id || !key.client_email || !key.private_key) throw new Error(`service-account key at ${path} is missing fields`);
+  if (!key.project_id || !key.client_email || !key.private_key) throw new Error(`service-account key in ${source} is missing fields`);
   return { credential: cert(key as Parameters<typeof cert>[0]), projectId: key.project_id };
 }
 
