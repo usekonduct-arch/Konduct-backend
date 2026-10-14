@@ -94,12 +94,17 @@ firebase deploy --only firestore:rules,firestore:indexes,functions --project <id
 ```
 The indexes file also turns on TTL clean-up for `rateLimits`, `payQuotes` and `idempotency`.
 
-**First staff member**
-1. Create an email/password user and verify the email.
-2. Run `npm run bootstrap-admin -- --email you@…`.
-3. Enrol MFA.
+**Staff and the console** ([konduct-console](../konduct-console))
+1. Firebase console → Authentication → Settings → upgrade to *Firebase Authentication with Identity Platform*.
+   Then, from `functions/`: `FIREBASE_SERVICE_ACCOUNT="$(cat key.json)" npm run enable-totp` (authenticator-app
+   two-step sign-in has no console switch).
+2. Each of the two founders signs in to the console, verifies their email and links an authenticator.
+3. From `functions/`, once per founder: `FIREBASE_SERVICE_ACCOUNT="$(cat key.json)" npm run bootstrap-admin -- --email founder@…`.
+   Two founding admins are allowed, because every role change needs a *second* admin to approve it.
+4. On Render, set `CONSOLE_ORIGINS` to the console's address (for example `https://konduct-console.vercel.app`);
+   the server only accepts browser calls from those origins.
 
-Every later role is granted through `staffGrantRole` plus a second admin's approval.
+Every later role is granted in the console (Staff) plus the other admin's approval.
 
 ## Running on Render (no Blaze plan)
 

@@ -10,7 +10,8 @@
     "start": "node lib/server.js",
     "test": "tsc && node --test \"lib/**/*.test.js\"",
     "test:emulator": "tsc && firebase emulators:exec --project demo-konduct --only firestore,auth \"node --test --test-concurrency=1 \\\"lib/**/*.emu.js\\\"\"",
-    "bootstrap-admin": "tsc && node lib/scripts/bootstrap-admin.js"
+    "bootstrap-admin": "tsc && node lib/scripts/bootstrap-admin.js",
+    "enable-totp": "tsc && node lib/scripts/enable-totp.js"
   },
   "dependencies": {
     "express": "^5.3.0",

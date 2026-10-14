@@ -58,6 +58,29 @@ const keepRaw = (req: express.Request, _res: Response, buf: Buffer) => {
 
 app.get("/healthz", (_req, res) => void res.status(200).send("ok"));
 
+/**
+ * The staff console is a website, so browsers need CORS. Only origins in CONSOLE_ORIGINS (comma-separated,
+ * for example https://konduct-console.vercel.app) may call from a page; the apps don't send an Origin.
+ */
+const consoleOrigins = new Set(
+  (process.env.CONSOLE_ORIGINS ?? "http://localhost:5190")
+    .split(",")
+    .map((o) => o.trim().replace(/\/$/, ""))
+    .filter(Boolean),
+);
+app.use((req, res, next) => {
+  const origin = req.get("origin");
+  if (origin && consoleOrigins.has(origin)) {
+    res.set("Access-Control-Allow-Origin", origin);
+    res.set("Vary", "Origin");
+    res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+    res.set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Firebase-AppCheck, Firebase-Instance-ID-Token, X-Firebase-GMPID, X-Client-Version");
+    res.set("Access-Control-Max-Age", "3600");
+  }
+  if (req.method === "OPTIONS") return void res.status(origin && consoleOrigins.has(origin) ? 204 : 403).end();
+  next();
+});
+
 app.post("/bachsWebhook", express.raw({ type: () => true, limit: "256kb", verify: keepRaw }), (req, res) => handleBachsWebhook(req as Request, res));
 
 const running = new Set<string>();

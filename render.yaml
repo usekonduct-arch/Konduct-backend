@@ -15,6 +15,9 @@ services:
         sync: false
       - key: ENFORCE_APP_CHECK
         value: "false"
+      # The staff console's address(es), comma-separated; browsers elsewhere can't call the API.
+      - key: CONSOLE_ORIGINS
+        value: https://konduct-console.vercel.app
       - key: TOPUP_RETURN_URL
         value: https://konduct.app/topup/done
       - key: DRIVER_CONTACT_EMAIL
