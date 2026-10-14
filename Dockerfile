@@ -13,6 +13,7 @@ WORKDIR /app
 COPY --from=build /app/package.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/lib ./lib
-USER node
+# No `USER node`: Render mounts secret files (the service-account key) for root only, and a non-root
+# server can't read them, so it can't verify any sign-in.
 EXPOSE 8080
 CMD ["node", "lib/server.js"]

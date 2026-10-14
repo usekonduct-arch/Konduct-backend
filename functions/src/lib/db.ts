@@ -1,10 +1,36 @@
-import { getApps, initializeApp } from "firebase-admin/app";
+import { readFileSync } from "node:fs";
+import { cert, getApps, initializeApp, type AppOptions } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { FieldValue, getFirestore, Timestamp, type Firestore } from "firebase-admin/firestore";
 
 import { CAMPUS_ID, SCHEMA_VERSION } from "../config";
 
-if (!getApps().length) initializeApp();
+/**
+ * On Render the service-account key is a secret file named by GOOGLE_APPLICATION_CREDENTIALS. Read it up front,
+ * so a missing, unreadable or malformed file stops the server with the reason instead of failing every sign-in.
+ * Cloud Functions has no such variable and uses its own credentials.
+ */
+function credentialOptions(): AppOptions | undefined {
+  const path = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  if (!path) return undefined;
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (e) {
+    throw new Error(`cannot read service-account key at ${path} (${(e as NodeJS.ErrnoException).code})`);
+  }
+  let key: { project_id?: string; client_email?: string; private_key?: string };
+  try {
+    key = JSON.parse(text);
+  } catch {
+    // Don't echo the parse error: it quotes the file, which holds the private key.
+    throw new Error(`service-account key at ${path} is not valid JSON`);
+  }
+  if (!key.project_id || !key.client_email || !key.private_key) throw new Error(`service-account key at ${path} is missing fields`);
+  return { credential: cert(key as Parameters<typeof cert>[0]), projectId: key.project_id };
+}
+
+if (!getApps().length) initializeApp(credentialOptions());
 
 export const db: Firestore = getFirestore();
 export const auth = getAuth();

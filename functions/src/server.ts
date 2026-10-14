@@ -95,7 +95,8 @@ app.post("/:name", express.json({ limit: "64kb", verify: keepRaw }), async (req,
     try {
       authData = { uid: "", token: await auth.verifyIdToken(bearer), rawToken: bearer };
       authData.uid = authData.token.uid;
-    } catch {
+    } catch (e) {
+      logger.warn("id token rejected", { code: (e as { code?: string }).code, reason: (e as Error).message });
       return sendError(res, new HttpsError("unauthenticated", "Please sign in again."));
     }
   }
