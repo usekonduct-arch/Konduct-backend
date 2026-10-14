@@ -1,6 +1,6 @@
 import { defineSecret, defineString } from "firebase-functions/params";
 
-/** Must match AppConfig.functionsRegion in konduct_app/lib/app/flavor.dart. */
+/** Must match AppConfig.functionsRegion in lib/app/app_info.dart of both apps (Konduct-student, Konduct-Driver). */
 export const REGION = "europe-west1";
 
 /** Pilot campus. Every record carries a campusId (SRS 2.1). */

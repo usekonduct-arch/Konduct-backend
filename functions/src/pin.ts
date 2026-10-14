@@ -9,7 +9,7 @@ export const PIN_ALGO = "scrypt-16384-8-1";
 /** 4 or 6 digits (FR-AUTH-06). */
 export const isPinShape = (pin: string) => /^(\d{4}|\d{6})$/.test(pin);
 
-/** Same rule as the app (konduct_app pin_screen.dart isWeakPin): no repeats, no runs. */
+/** Same rule as both apps (lib/auth/screens/pin_screen.dart isWeakPin): no repeats, no runs. */
 export function isWeakPin(pin: string): boolean {
   if (new Set(pin).size === 1) return true;
   const d = [...pin].map(Number);
