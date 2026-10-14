@@ -17,7 +17,7 @@ import { setUserStatus, issueVehicleQr, inviteDriver, resetDriverCode } from "./
 import { claimDriverAccount } from "./domain/accounts";
 import { memberToken } from "./lib/guards";
 import { decide } from "./domain/approvals";
-import { onPayoutEvent, payoutDriver, setPayoutAccount } from "./domain/payouts";
+import { onPayoutEvent, payoutDriver, requestRiderWithdrawal, setPayoutAccount } from "./domain/payouts";
 import { openDispute, resolveDispute, reviewDispute } from "./domain/disputes";
 import { reconcile } from "./domain/recon";
 
@@ -405,6 +405,32 @@ describe("driver payouts via Bachs Connect", () => {
     const back = bachsCalls.find((c) => c.path === "/v1/transfers" && c.body.destination === "self");
     assert.ok(back, "money pulled back from the driver's Bachs account");
     assert.equal((await verifyAccount(driverAccount(d.uid))).ok, true);
+  });
+
+  test("a student withdraws part of their wallet; a failed payout comes back to it", async () => {
+    const r = await makeRider(300_000);
+    await setPin(r.uid, "2580");
+    assert.equal(await reason(requestRiderWithdrawal(r.actor, { amountKobo: 100_000, pin: "2580" })), "no_payout_account");
+    await db.runTransaction(async (tx) => {
+      const pa = db.collection("payoutAccounts").doc();
+      tx.set(pa, { uid: r.uid, bachsAccountId: "acct_r1", destinationId: "pd_r1", accountLast4: "4321", status: "active", holdUntilMs: 0, ...stamp() });
+      tx.update(db.doc(`users/${r.uid}`), { payoutAccountId: pa.id });
+    });
+    onBachs("GET", "/v1/payouts/destinations/pd_r1", () => ({ json: { id: "pd_r1", is_usable: true } }));
+    onBachs("POST", "/v1/transfers", (b) => ({ json: { id: uniq("tr_"), status: "paid", amount: b.amount, currency: "NGN" } }));
+    onBachs("POST", "/v1/payouts", (b) => ({ json: { id: "pay_r1", status: "pending", amount: b.amount, reference: b.reference } }));
+
+    assert.equal(await reason(requestRiderWithdrawal(r.actor, { amountKobo: 400_000, pin: "2580" })), "insufficient_funds");
+    const w = await requestRiderWithdrawal(r.actor, { amountKobo: 100_000, pin: "2580" });
+    assert.equal(w.amountKobo, 100_000);
+    assert.equal(await balance(riderAccount(r.uid)), 200_000); // only what they asked for
+    const transfer = bachsCalls.find((c) => c.path === "/v1/transfers" && c.body.transfer_group === w.payoutId)!;
+    assert.equal(transfer.body.amount, "1050.00"); // Konduct covers the ₦50 fee
+    assert.equal(transfer.body.description, "Konduct wallet withdrawal");
+
+    await onPayoutEvent("payout.failed", w.payoutId!, {});
+    assert.equal(await balance(riderAccount(r.uid)), 300_000);
+    assert.equal((await verifyAccount(riderAccount(r.uid))).ok, true);
   });
 
   test("payouts stop when the kill switch is on", async () => {

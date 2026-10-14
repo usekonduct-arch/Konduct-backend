@@ -125,3 +125,6 @@ export const getPayout = (accountId: string, payoutId: string) =>
 export type Balances = { balances?: { currency: string; available_balance: string; pending_balance?: string }[] } & Record<string, unknown>;
 
 export const getBalances = () => bachs<Balances>("GET", "/v1/balances");
+
+export const getBanks = (country: string) =>
+  bachs<{ country?: string; banks?: { code?: string; name?: string }[] }>("GET", `/v1/reference/banks?country=${encodeURIComponent(country)}`);

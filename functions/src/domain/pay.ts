@@ -156,7 +156,12 @@ export async function confirmPayment(actor: Actor, input: z.infer<typeof Confirm
   const quoteRef = db.doc(`payQuotes/${input.quoteId}`);
   const quote = await quoteRef.get();
   if (!quote.exists || quote.get("uid") !== actor.uid) fail("not-found", "quote_missing", "Scan the code again to pay.");
-  if (quote.get("status") !== "open") fail("failed-precondition", "quote_used", "This scan was already used. Scan again to pay.");
+  if (quote.get("status") !== "open") {
+    // A double-tap or retry can arrive just after the first request paid: give back that result.
+    const done = await idemRef.get();
+    if (done.exists && done.get("uid") === actor.uid) return done.get("result") as PayResult;
+    fail("failed-precondition", "quote_used", "This scan was already used. Scan again to pay.");
+  }
   if (quote.get("expiresAtMs") < Date.now()) fail("deadline-exceeded", "quote_expired", "That took a while. Scan the code again.");
   if (quote.get("recentPaidAtMs") && !input.repeatConfirmed) {
     fail("failed-precondition", "repeat_scan", "You paid this vehicle a few minutes ago. Adding another passenger, or did you already pay?");

@@ -1,12 +1,13 @@
 /**
- * Driver payouts through Bachs Connect (FR-DRV-03/05/06, SEC-PAY-06/07).
+ * Bank payouts through Bachs Connect (FR-DRV-03/05/06, SEC-PAY-06/07): drivers' earnings, and
+ * students withdrawing their wallet balance.
  *
- * Bachs only pays out to a destination owned by the account paying, so each driver is a Bachs
+ * Bachs only pays out to a destination owned by the account paying, so each person is a Bachs
  * Connect *recipient* account with their own verified bank destination. A payout is:
  *
- *   reserve  (ledger)  debit driver wallet  -> credit payouts-in-progress
- *   transfer (Bachs)   Konduct balance      -> driver's Bachs account   (amount + Bachs fee)
- *   payout   (Bachs)   driver's Bachs acct  -> driver's bank            (amount)
+ *   reserve  (ledger)  debit their wallet    -> credit payouts-in-progress
+ *   transfer (Bachs)   Konduct balance      -> their Bachs account      (amount + Bachs fee)
+ *   payout   (Bachs)   their Bachs account  -> their bank               (amount)
  *   settle   (ledger)  on payout.paid: debit in-progress + fees -> credit Bachs float
  *   return   (ledger)  on failure: money comes back and the reservation is reversed
  *
@@ -16,13 +17,13 @@
 import { z } from "zod";
 
 import { DRIVER_CONTACT_EMAIL, RULES } from "../config";
-import { BachsError, createPayout, createRecipientAccount, createTransfer, getDestination, getPayout, listDestinations, updateAccount } from "../bachs/client";
+import { BachsError, createPayout, createRecipientAccount, createTransfer, getBanks, getDestination, getPayout, listDestinations, updateAccount } from "../bachs/client";
 import { audit } from "../lib/audit";
 import { db, millis, stamp, touched } from "../lib/db";
 import { fail, isHttpsError } from "../lib/errors";
 import { type Actor, rateLimit, requireRecentSignIn } from "../lib/guards";
 import { naira, toDecimal, toKobo } from "../lib/money";
-import { driverAccount, InsufficientFunds, PLATFORM, prepare } from "../ledger/ledger";
+import { driverAccount, InsufficientFunds, PLATFORM, prepare, riderAccount } from "../ledger/ledger";
 import { checkPin } from "./accounts";
 import { requestApproval } from "./approvals";
 import { notify } from "./notify";
@@ -52,14 +53,14 @@ export function namesMatch(verified: string, resolved: string): boolean {
 /* ------------------------------------------------------- bank account set-up */
 
 export const PayoutAccountInput = z.strictObject({
-  bankCode: z.string().regex(/^\d{3,6}$/),
+  bankCode: z.string().regex(/^[0-9A-Z]{2,10}$/),
   accountNumber: z.string().regex(/^\d{10}$/, "Nigerian account numbers are 10 digits."),
   pin: z.string().max(6),
 });
 
 /**
- * FR-DRV-05: needs a fresh SMS code (re-authentication) and the PIN. The new account goes to
- * staff approval (SEC-PAY-06) and its first payout is held 24 hours.
+ * FR-DRV-05: needs a fresh password sign-in (re-authentication) and the PIN. The new account goes
+ * to staff approval (SEC-PAY-06) and its first payout is held 24 hours. Same for riders and drivers.
  */
 export async function setPayoutAccount(actor: Actor, input: z.infer<typeof PayoutAccountInput>) {
   requireRecentSignIn(actor);
@@ -77,7 +78,8 @@ export async function setPayoutAccount(actor: Actor, input: z.infer<typeof Payou
         entity_type: "individual",
         configuration: { recipient: { capabilities: { transfers: { requested: true }, payouts: { requested: true } } } },
       },
-      `konduct-driver-${actor.uid}`,
+      // Drivers keep the key they were created with; riders get their own.
+      actor.role === "driver" ? `konduct-driver-${actor.uid}` : `konduct-${actor.role}-${actor.uid}`,
     );
     bachsAccountId = acct.id;
     await db.runTransaction(async (tx) => {
@@ -145,15 +147,26 @@ export async function activatePayoutAccount(payoutAccountId: string, approverUid
 
 /* ------------------------------------------------------------------ payouts */
 
-type Trigger = "daily" | "driver_request";
+type Trigger = "daily" | "driver_request" | "rider_request";
 
 /** FR-DRV-03: pays a driver's whole available balance to their approved bank account. */
-export async function payoutDriver(uid: string, trigger: Trigger): Promise<{ status: string; payoutId?: string; amountKobo?: number }> {
+export const payoutDriver = (uid: string, trigger: "daily" | "driver_request") => payoutMember(uid, trigger);
+
+/** The wallet a payout comes out of. Older payout records (before riders could withdraw) are drivers'. */
+const accountOf = (p: FirebaseFirestore.DocumentData) => (p.account as string | undefined) ?? driverAccount(p.uid as string);
+
+/**
+ * Pays out to the person's approved bank account: a driver's whole balance, or the amount a rider
+ * asks to withdraw. Konduct covers the Bachs payout fee either way.
+ */
+export async function payoutMember(uid: string, trigger: Trigger, requestedKobo?: number): Promise<{ status: string; payoutId?: string; amountKobo?: number }> {
   const sw = await getSwitches();
   if (sw.payoutsPaused || sw.payoutsHaltedByRecon) return { status: "paused" };
 
   const user = await db.doc(`users/${uid}`).get();
-  if (user.get("role") !== "driver" || user.get("status") !== "active") return { status: "driver_inactive" };
+  const role = user.get("role");
+  if ((role !== "driver" && role !== "rider") || user.get("status") !== "active") return { status: "driver_inactive" };
+  const account = role === "rider" ? riderAccount(uid) : driverAccount(uid);
   const paId = user.get("payoutAccountId") as string | undefined;
   if (!paId) return { status: "no_payout_account" };
   const pa = await db.doc(`payoutAccounts/${paId}`).get();
@@ -168,17 +181,19 @@ export async function payoutDriver(uid: string, trigger: Trigger): Promise<{ sta
   try {
     await db.runTransaction(async (tx) => {
       const [wallet, open] = await Promise.all([
-        tx.get(db.doc(`wallets/${driverAccount(uid)}`)),
+        tx.get(db.doc(`wallets/${account}`)),
         tx.get(db.collection("payouts").where("uid", "==", uid).where("status", "in", ["reserved", "transferred", "submitted", "unknown"]).limit(1)),
       ]);
       if (!open.empty) fail("failed-precondition", "payout_in_progress", "A payout is already on its way.");
-      amountKobo = wallet.get("balanceKobo") ?? 0;
+      const balance = (wallet.get("balanceKobo") as number) ?? 0;
+      amountKobo = requestedKobo ?? balance;
       if (amountKobo < RULES.minPayoutKobo) fail("failed-precondition", "below_minimum", `Payouts start from ${naira(RULES.minPayoutKobo)}.`);
+      if (amountKobo > balance) fail("failed-precondition", "insufficient_funds", `You have ${naira(balance)} to withdraw.`);
       const ledger = await prepare(tx, {
         txId: `payout_${payoutId}`,
         type: "payout.reserve",
         legs: [
-          { account: driverAccount(uid), side: "debit", amountKobo },
+          { account, side: "debit", amountKobo },
           { account: PLATFORM.payoutsInProgress, side: "credit", amountKobo },
         ],
         refs: { payoutId },
@@ -186,6 +201,7 @@ export async function payoutDriver(uid: string, trigger: Trigger): Promise<{ sta
       ledger.commit();
       tx.create(payoutRef, {
         uid,
+        account,
         amountKobo,
         feeKobo: RULES.payoutFeeKobo,
         method: "bank",
@@ -204,7 +220,7 @@ export async function payoutDriver(uid: string, trigger: Trigger): Promise<{ sta
   } catch (e) {
     if (e instanceof InsufficientFunds) return { status: "below_minimum" };
     const why = isHttpsError(e) ? (e.details as { reason?: string })?.reason : undefined;
-    if (why === "payout_in_progress" || why === "below_minimum") return { status: why };
+    if (why === "payout_in_progress" || why === "below_minimum" || why === "insufficient_funds") return { status: why };
     throw e;
   }
   await submit(payoutId);
@@ -223,7 +239,7 @@ export async function submit(payoutId: string) {
           amount: toDecimal(p.amountKobo + p.feeKobo), // Konduct covers the Bachs payout fee
           currency: "NGN",
           transfer_group: payoutId,
-          description: "Konduct driver payout",
+          description: String(p.account ?? "").startsWith("rider_") ? "Konduct wallet withdrawal" : "Konduct driver payout",
         },
         `payout-${payoutId}-transfer`,
       );
@@ -312,7 +328,7 @@ async function release(payoutId: string, reason: string) {
       type: "payout.return",
       legs: [
         { account: PLATFORM.payoutsInProgress, side: "debit", amountKobo },
-        { account: driverAccount(uid), side: "credit", amountKobo },
+        { account: accountOf(p.data()!), side: "credit", amountKobo },
       ],
       refs: { payoutId },
       reversalOf: `payout_${payoutId}`,
@@ -322,7 +338,7 @@ async function release(payoutId: string, reason: string) {
     audit({ actor: "system:payouts", action: "payout.returned", target: ref.path, after: { reason } }, tx);
     return { uid, amountKobo };
   });
-  if (result) await notify(result.uid, "payout.failed", { title: "Payout didn't go through", body: `${naira(result.amountKobo)} is back in your Konduct balance. Check your bank details with an agent.` });
+  if (result) await notify(result.uid, "payout.failed", { title: "Payout didn't go through", body: `${naira(result.amountKobo)} is back in your Konduct wallet. Check your bank details, or talk to an agent.` });
 }
 
 /** Resolves payouts left "unknown" by a timeout, using Bachs as the source of truth. */
@@ -349,11 +365,7 @@ export async function reconcilePayouts() {
   }
 }
 
-export async function requestDriverPayout(actor: Actor, pin: string) {
-  await rateLimit(actor.uid, "cashout", 3, 24 * 3_600_000);
-  await checkPin(actor.uid, pin);
-  const r = await payoutDriver(actor.uid, "driver_request");
-  const messages: Record<string, string> = {
+const PAYOUT_MESSAGES: Record<string, string> = {
     paused: "Payouts are paused for a moment. Your money is safe.",
     no_payout_account: "Add a bank account first.",
     payout_account_inactive: "Your bank account is still being checked.",
@@ -362,8 +374,46 @@ export async function requestDriverPayout(actor: Actor, pin: string) {
     below_minimum: `Payouts start from ${naira(RULES.minPayoutKobo)}.`,
     payout_in_progress: "A payout is already on its way.",
     driver_inactive: "This account is on hold. Talk to a Konduct agent.",
-  };
-  if (r.status !== "submitted") fail("failed-precondition", r.status, messages[r.status] ?? "Payout isn't available right now.");
+    insufficient_funds: "That's more than you have in your wallet.",
+};
+
+export async function requestDriverPayout(actor: Actor, pin: string) {
+  await rateLimit(actor.uid, "cashout", 3, 24 * 3_600_000);
+  await checkPin(actor.uid, pin);
+  const r = await payoutDriver(actor.uid, "driver_request");
+  if (r.status !== "submitted") fail("failed-precondition", r.status, PAYOUT_MESSAGES[r.status] ?? "Payout isn't available right now.");
   return r;
+}
+
+export const WithdrawInput = z.strictObject({
+  amountKobo: z.number().int().min(RULES.minPayoutKobo).refine((n) => n % 100 === 0, "Withdraw whole naira."),
+  pin: z.string().max(6),
+});
+
+/** A student withdraws part or all of their wallet to their approved bank account. */
+export async function requestRiderWithdrawal(actor: Actor, input: z.infer<typeof WithdrawInput>) {
+  await rateLimit(actor.uid, "cashout", 3, 24 * 3_600_000);
+  await checkPin(actor.uid, input.pin);
+  const r = await payoutMember(actor.uid, "rider_request", input.amountKobo);
+  if (r.status !== "submitted") fail("failed-precondition", r.status, PAYOUT_MESSAGES[r.status] ?? "Withdrawals aren't available right now.");
+  return r;
+}
+
+/* -------------------------------------------------------------------- banks */
+
+let bankCache: { at: number; banks: { code: string; name: string }[] } | null = null;
+
+/** Nigerian banks for the account picker, from Bachs (cached for a day). */
+export async function listBanks() {
+  if (!bankCache || Date.now() - bankCache.at > 24 * 3_600_000) {
+    const r = await getBanks("NG");
+    const banks = (r.banks ?? [])
+      .filter((b) => b.code && b.name)
+      .map((b) => ({ code: String(b.code), name: String(b.name) }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    if (!banks.length) fail("unavailable", "banks_unavailable", "We couldn't load the list of banks. Try again in a moment.");
+    bankCache = { at: Date.now(), banks };
+  }
+  return { banks: bankCache.banks };
 }
 

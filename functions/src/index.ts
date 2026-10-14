@@ -2,9 +2,9 @@
  * Konduct backend: every endpoint the apps and consoles can reach.
  *
  *  Rider     registerRider (email + password sign-in), setTransactionPin, changePin, payPreview, payConfirm, payUndo,
- *            createTopUp, openDispute, lockMyAccount, registerDevice
+ *            createTopUp, openDispute, lockMyAccount, registerDevice, riderSetPayoutAccount, riderWithdraw, payoutBanks
  *  Driver    claimDriverAccount (agent's one-time code), (setTransactionPin, changePin, lockMyAccount, registerDevice),
- *            driverConfirmOfflineCode, driverSetPayoutAccount, driverRequestPayout
+ *            driverConfirmOfflineCode, driverSetPayoutAccount, driverRequestPayout, payoutBanks
  *  Staff     staff* (MFA + role checked): onboarding, QR, routes, people, switches, approvals,
  *            disputes
  *  Bachs     bachsWebhook (HTTP, signature-verified)
@@ -25,7 +25,7 @@ import { decide } from "./domain/approvals";
 import { OpenDispute, openDispute, ResolveDispute, resolveDispute, reviewDispute } from "./domain/disputes";
 import { createTopUp, TopUpInput } from "./domain/funding";
 import { ConfirmInput, confirmOfflineCode, confirmPayment, previewPayment, PreviewInput, undoPayment } from "./domain/pay";
-import { PayoutAccountInput, requestDriverPayout, setPayoutAccount } from "./domain/payouts";
+import { listBanks, PayoutAccountInput, requestDriverPayout, requestRiderWithdrawal, setPayoutAccount, WithdrawInput } from "./domain/payouts";
 import {
   InviteDriver,
   inviteDriver,
@@ -93,6 +93,21 @@ export const payUndo = callable(z.strictObject({ txId: z.string().max(60) }), as
 const createTopUp_ = callable(TopUpInput, async (req, data) => createTopUp(await requireMember(req, ["rider"]), data), { secrets: [BACHS_API_KEY] });
 
 const openDispute_ = callable(OpenDispute, async (req, data) => openDispute(await requireMember(req, ["rider"]), data));
+
+/** Students add a bank account (fresh sign-in + PIN, second-person approval) and withdraw their wallet to it. */
+export const riderSetPayoutAccount = callable(PayoutAccountInput, async (req, data) => setPayoutAccount(await requireMember(req, ["rider"]), data), {
+  secrets: [BACHS_API_KEY],
+});
+
+export const riderWithdraw = callable(WithdrawInput, async (req, data) => requestRiderWithdrawal(await requireMember(req, ["rider"]), data), {
+  secrets: [BACHS_API_KEY],
+});
+
+/** The bank picker in both apps. */
+export const payoutBanks = callable(Empty, async (req) => {
+  await requireMember(req, ["rider", "driver"]);
+  return listBanks();
+}, { secrets: [BACHS_API_KEY] });
 
 /* ----------------------------------------------------------------- drivers */
 
