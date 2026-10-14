@@ -106,6 +106,21 @@ service cloud.firestore {
     match /auditLogs/{id} { allow read: if auditor(); }
     match /webhookEvents/{id} { allow read: if auditor(); }
 
+    // Landing-page pilot sign-ups (konduct-landing/src/lib/waitlist.ts). Anyone may add one
+    // well-formed entry; nobody can read, edit or delete entries from a browser.
+    match /waitlist/{id} {
+      allow read: if staffReader();
+      allow create: if request.resource.data.keys().hasOnly(['role', 'name', 'contact', 'source', 'createdAt'])
+        && request.resource.data.keys().hasAll(['role', 'name', 'contact', 'source', 'createdAt'])
+        && request.resource.data.role in ['student', 'driver', 'park']
+        && request.resource.data.name is string
+        && request.resource.data.name.size() >= 2 && request.resource.data.name.size() <= 80
+        && request.resource.data.contact is string
+        && request.resource.data.contact.size() >= 5 && request.resource.data.contact.size() <= 120
+        && request.resource.data.source == 'landing'
+        && request.resource.data.createdAt == request.time;
+    }
+
     // Everything else (pins, studentIds, fundingCodes, payerAccounts, payQuotes, idempotency,
     // rateLimits, dailyTotals, connectAccounts, devices, ...) has no rule and is denied.
   }

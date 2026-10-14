@@ -1,0 +1,7 @@
+.git
+**/node_modules
+functions/lib
+functions/.env*
+functions/.secret*
+**/*.log
+service-account*.json

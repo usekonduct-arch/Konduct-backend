@@ -12,21 +12,20 @@
  */
 import { onRequest } from "firebase-functions/v2/https";
 import { onSchedule } from "firebase-functions/v2/scheduler";
-import { logger } from "firebase-functions";
 import { z } from "zod";
 
 import { BACHS_API_KEY, BACHS_WEBHOOK_SECRETS, IDENTITY_KEY, OFFLINE_CODE_KEY, QR_SIGNING_KEY, REGION } from "./config";
 import { handleBachsWebhook } from "./bachs/webhook";
 import { callable, Empty } from "./api/callable";
-import { db, stamp, touched } from "./lib/db";
+import { db, stamp } from "./lib/db";
+import { JOBS } from "./jobs";
 import { memberToken, requireMember, requireStaff } from "./lib/guards";
 import { changePin, claimDriverAccount, RegisterRider, registerRider, setTransactionPin } from "./domain/accounts";
 import { decide } from "./domain/approvals";
 import { OpenDispute, openDispute, ResolveDispute, resolveDispute, reviewDispute } from "./domain/disputes";
 import { createTopUp, TopUpInput } from "./domain/funding";
 import { ConfirmInput, confirmOfflineCode, confirmPayment, previewPayment, PreviewInput, undoPayment } from "./domain/pay";
-import { PayoutAccountInput, payoutDriver, reconcilePayouts, requestDriverPayout, setPayoutAccount } from "./domain/payouts";
-import { reconcile } from "./domain/recon";
+import { PayoutAccountInput, requestDriverPayout, setPayoutAccount } from "./domain/payouts";
 import {
   InviteDriver,
   inviteDriver,
@@ -179,37 +178,13 @@ export const bachsWebhook = onRequest(
 
 const job = { region: REGION, timeZone: "Africa/Lagos", secrets: [BACHS_API_KEY], timeoutSeconds: 540, memory: "512MiB" as const, retryCount: 1 };
 
-/** FR-DRV-03: daily automatic payout is the default, after the evening rush. */
-export const dailyPayoutRun = onSchedule({ ...job, schedule: "30 21 * * *" }, async () => {
-  const drivers = await db.collection("users").where("role", "==", "driver").where("status", "==", "active").where("payoutAccountId", "!=", null).get();
-  const tally: Record<string, number> = {};
-  for (const d of drivers.docs) {
-    try {
-      const r = await payoutDriver(d.id, "daily");
-      tally[r.status] = (tally[r.status] ?? 0) + 1;
-    } catch (e) {
-      tally.error = (tally.error ?? 0) + 1;
-      logger.error("payout failed", { uid: d.id, err: (e as Error).message });
-    }
-  }
-  logger.info("payout run", tally);
-});
+export const dailyPayoutRun = onSchedule({ ...job, schedule: "30 21 * * *" }, () => JOBS.dailyPayoutRun().then(() => {}));
 
-export const reconcileDaily = onSchedule({ ...job, schedule: "30 2 * * *" }, async () => {
-  await reconcile();
-});
+export const reconcileDaily = onSchedule({ ...job, schedule: "30 2 * * *" }, () => JOBS.reconcileDaily().then(() => {}));
 
-export const reconcilePayoutsJob = onSchedule({ ...job, schedule: "every 15 minutes", timeoutSeconds: 300 }, async () => {
-  await reconcilePayouts();
-});
+export const reconcilePayoutsJob = onSchedule({ ...job, schedule: "every 15 minutes", timeoutSeconds: 300 }, () => JOBS.reconcilePayoutsJob().then(() => {}));
 
-/** FR-DSP-02: raise disputes that are past their SLA. */
-export const disputeSlaWatch = onSchedule({ ...job, schedule: "0 * * * *", secrets: [] }, async () => {
-  const late = await db.collection("disputes").where("state", "in", ["open", "under_review"]).where("slaDueAtMs", "<", Date.now()).limit(200).get();
-  for (const d of late.docs) {
-    if (!d.get("slaBreached")) await d.ref.update({ slaBreached: true, ...touched() });
-  }
-});
+export const disputeSlaWatch = onSchedule({ ...job, schedule: "0 * * * *", secrets: [] }, () => JOBS.disputeSlaWatch().then(() => {}));
 
 /*
  * Public names. The `_` suffix above avoids clashing with the imported domain functions;

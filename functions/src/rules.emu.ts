@@ -7,7 +7,7 @@ import { resolve } from "node:path";
 import { after, before, describe, test } from "node:test";
 
 import { assertFails, assertSucceeds, initializeTestEnvironment, type RulesTestEnvironment } from "@firebase/rules-unit-testing";
-import { doc, getDoc, setDoc, updateDoc, deleteDoc, collection, getDocs, query, where } from "firebase/firestore";
+import { doc, getDoc, setDoc, updateDoc, deleteDoc, collection, getDocs, query, where, serverTimestamp } from "firebase/firestore";
 
 let env: RulesTestEnvironment;
 const [host, port] = (process.env.FIRESTORE_EMULATOR_HOST ?? "127.0.0.1:8080").split(":");
@@ -120,5 +120,36 @@ describe("staff and strangers", () => {
     await assertFails(getDoc(doc(anon, "routes/r1")));
     await assertFails(getDoc(doc(anon, "config/switches")));
     await assertFails(getDoc(doc(anon, "wallets/rider_alice")));
+  });
+});
+
+describe("landing-page waitlist", () => {
+  const entry = () => ({ role: "student", name: "Ada Okafor", contact: "ada@example.com", source: "landing", createdAt: serverTimestamp() });
+
+  test("anyone can add one well-formed entry", async () => {
+    const anon = env.unauthenticatedContext().firestore();
+    await assertSucceeds(setDoc(doc(anon, "waitlist/w1"), entry()));
+  });
+
+  test("nobody can read, edit or delete entries from a browser", async () => {
+    const anon = env.unauthenticatedContext().firestore();
+    const alice = env.authenticatedContext("alice", { role: "rider" }).firestore();
+    await env.withSecurityRulesDisabled((ctx) => setDoc(doc(ctx.firestore(), "waitlist/w2"), { ...entry(), createdAt: new Date() }));
+    await assertFails(getDoc(doc(anon, "waitlist/w2")));
+    await assertFails(getDocs(collection(alice, "waitlist")));
+    await assertFails(setDoc(doc(anon, "waitlist/w2"), entry()));
+    await assertFails(updateDoc(doc(anon, "waitlist/w2"), { name: "Changed" }));
+    await assertFails(deleteDoc(doc(anon, "waitlist/w2")));
+  });
+
+  test("odd shapes are refused", async () => {
+    const anon = env.unauthenticatedContext().firestore();
+    await assertFails(setDoc(doc(anon, "waitlist/x1"), { ...entry(), role: "admin" }));
+    await assertFails(setDoc(doc(anon, "waitlist/x2"), { ...entry(), name: "x".repeat(81) }));
+    await assertFails(setDoc(doc(anon, "waitlist/x3"), { ...entry(), contact: "1" }));
+    await assertFails(setDoc(doc(anon, "waitlist/x4"), { ...entry(), createdAt: new Date(2020, 0, 1) }));
+    await assertFails(setDoc(doc(anon, "waitlist/x5"), { ...entry(), isAdmin: true }));
+    const { source: _source, ...noSource } = entry();
+    await assertFails(setDoc(doc(anon, "waitlist/x6"), noSource));
   });
 });

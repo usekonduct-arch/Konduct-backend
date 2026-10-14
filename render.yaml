@@ -1,0 +1,35 @@
+# Render Blueprint. Secrets are marked sync: false, so Render asks for them on first deploy
+# and they never live in this repo.
+services:
+  - type: web
+    name: konduct-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: frankfurt
+    healthCheckPath: /healthz
+    autoDeployTrigger: commit
+    envVars:
+      # Upload the Firebase service-account key as a Secret File named service-account.json.
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        value: /etc/secrets/service-account.json
+      - key: ENFORCE_APP_CHECK
+        value: "false"
+      - key: TOPUP_RETURN_URL
+        value: https://konduct.app/topup/done
+      - key: DRIVER_CONTACT_EMAIL
+        value: ops+driver-{uid}@konduct.app
+      - key: BACHS_ACCOUNT_ID
+        sync: false
+      - key: IDENTITY_KEY
+        sync: false
+      - key: QR_SIGNING_KEY
+        sync: false
+      - key: OFFLINE_CODE_KEY
+        sync: false
+      - key: BACHS_API_KEY
+        sync: false
+      - key: BACHS_WEBHOOK_SECRETS
+        sync: false
+      - key: JOBS_SECRET
+        generateValue: true

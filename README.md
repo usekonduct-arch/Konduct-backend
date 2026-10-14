@@ -101,6 +101,41 @@ The indexes file also turns on TTL clean-up for `rateLimits`, `payQuotes` and `i
 
 Every later role is granted through `staffGrantRole` plus a second admin's approval.
 
+## Running on Render (no Blaze plan)
+
+Until the project moves to Blaze, the same endpoints run as one Express server on Render
+(`functions/src/server.ts`, built by the root `Dockerfile`). Firestore, Auth and push stay on Firebase's
+free Spark plan through the Admin SDK. Moving to Cloud Functions later needs no code change: deploy as above
+and build the apps without `BACKEND_URL`.
+
+1. **Firebase (Spark)**: create Firestore and turn on Email/Password as above, then
+   `firebase deploy --only firestore:rules,firestore:indexes --project <id>` (no functions).
+2. **Service account**: Project settings → Service accounts → *Generate new private key*. Never commit it.
+3. **Render**: New → Blueprint → this repo (`render.yaml`). Then:
+   - Add the key as a **Secret File** named `service-account.json`.
+   - Fill in the secrets it asks for (same as the table above). Keep `JOBS_SECRET`, which Render generates.
+4. **Bachs webhook URL**: `https://<service>.onrender.com/bachsWebhook`.
+5. **Apps**: build both with `--dart-define=BACKEND_URL=https://<service>.onrender.com`.
+6. **Jobs**: Render's free plan has no cron, so create these at a free cron service (e.g. cron-job.org), each a
+   `POST` with header `Authorization: Bearer <JOBS_SECRET>`, timezone Africa/Lagos:
+
+   | URL | When |
+   | --- | --- |
+   | `/jobs/dailyPayoutRun` | 21:30 daily |
+   | `/jobs/reconcileDaily` | 02:30 daily |
+   | `/jobs/reconcilePayoutsJob` | every 15 minutes |
+   | `/jobs/disputeSlaWatch` | hourly |
+
+   A job answers `202` straight away and runs in the background.
+
+**Limits of the free setup**
+- A free Render service sleeps after 15 minutes idle and takes up to a minute to wake. The 15-minute
+  payout check keeps it mostly awake; the paid Starter plan removes this. Bachs retries webhooks that
+  time out.
+- Spark Firestore quota is 50k reads / 20k writes a day: enough for a pilot, not for a campus.
+- Staff MFA needs Identity Platform, which may need Blaze for your chosen second factor. Staff calls are
+  refused without MFA; don't turn `REQUIRE_STAFF_MFA` off in production.
+
 ## How people sign in
 
 - **Riders**: email + password, then name + student ID (`registerRider`). The student ID is unique per campus.

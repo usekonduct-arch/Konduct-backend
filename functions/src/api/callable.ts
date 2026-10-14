@@ -5,6 +5,9 @@ import { z } from "zod";
 
 import { ENFORCE_APP_CHECK, REGION } from "../config";
 
+/** Anything `callable()` returns: the server can run it outside Cloud Functions. */
+export type Callable = { run: (req: CallableRequest) => Promise<unknown> };
+
 type Opts = { secrets?: SecretParam[]; minInstances?: number; memory?: "256MiB" | "512MiB" | "1GiB"; timeoutSeconds?: number };
 
 /**
@@ -14,7 +17,22 @@ type Opts = { secrets?: SecretParam[]; minInstances?: number; memory?: "256MiB" 
  * - unexpected errors become a generic "internal" so stack traces and internals never leak
  */
 export function callable<S extends z.ZodType, R>(schema: S, handler: (req: CallableRequest, data: z.infer<S>) => Promise<R>, opts: Opts = {}) {
-  return onCall(
+  const run = async (req: CallableRequest): Promise<R> => {
+    const parsed = schema.safeParse(req.data ?? {});
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      throw new HttpsError("invalid-argument", issue?.message?.length && issue.message.length < 120 ? issue.message : "Check your details and try again.", { reason: "invalid_input" });
+    }
+    try {
+      return await handler(req, parsed.data);
+    } catch (e) {
+      if (e instanceof HttpsError) throw e;
+      logger.error("unhandled error", { fn: req.rawRequest?.path, err: (e as Error).message, stack: (e as Error).stack?.split("\n").slice(0, 4).join(" | ") });
+      throw new HttpsError("internal", "Something went wrong on our side. Nothing was charged twice; try again.", { reason: "internal" });
+    }
+  };
+  // `run` is the same checks without the Cloud Functions wrapper, for the Render server (server.ts).
+  const fn = onCall(
     {
       region: REGION,
       enforceAppCheck: ENFORCE_APP_CHECK,
@@ -25,21 +43,9 @@ export function callable<S extends z.ZodType, R>(schema: S, handler: (req: Calla
       timeoutSeconds: opts.timeoutSeconds ?? 30,
       maxInstances: 50,
     },
-    async (req) => {
-      const parsed = schema.safeParse(req.data ?? {});
-      if (!parsed.success) {
-        const issue = parsed.error.issues[0];
-        throw new HttpsError("invalid-argument", issue?.message?.length && issue.message.length < 120 ? issue.message : "Check your details and try again.", { reason: "invalid_input" });
-      }
-      try {
-        return await handler(req, parsed.data);
-      } catch (e) {
-        if (e instanceof HttpsError) throw e;
-        logger.error("unhandled error", { fn: req.rawRequest?.path, err: (e as Error).message, stack: (e as Error).stack?.split("\n").slice(0, 4).join(" | ") });
-        throw new HttpsError("internal", "Something went wrong on our side. Nothing was charged twice; try again.", { reason: "internal" });
-      }
-    },
+    run,
   );
+  return Object.assign(fn, { run });
 }
 
 export const Empty = z.strictObject({});
