@@ -5,8 +5,9 @@
  *             the fare table and stores a single-use quote (SEC-QR-05). Nothing moves.
  * confirm  -> one Firestore transaction: re-checks everything, enforces limits, debits the rider,
  *             credits the driver, writes ledger entries, the transaction, one trip per passenger
- *             and the driver's live alert. Same idempotency key = same result, never a 2nd debit.
- * undo     -> 60s wrong-vehicle undo, by reversing entries (never editing them).
+ *             and the driver's live alert, and takes the riders' seats on the bus (seats.ts).
+ *             Same idempotency key = same result, never a 2nd debit.
+ * undo     -> 60s wrong-vehicle undo, by reversing entries (never editing them); frees the seats.
  *
  * Amounts from the client are never trusted (SEC-PAY-04): the client sends a quote id.
  */
@@ -24,6 +25,8 @@ import { checkPin } from "./accounts";
 import { notify } from "./notify";
 import { assertOpen, dailyRef, getSwitches, limitsFor, readDaily } from "./policy";
 import { readVehicleToken } from "./qr";
+import type { CurrentRoute } from "./landmarks";
+import { alighted, assertSeats, boarded, countsSeats, fleetRef, liveLoad, type Load, readFleet } from "./seats";
 
 const firstName = (full: unknown) => String(full ?? "").trim().split(/\s+/)[0] || "Driver";
 
@@ -58,11 +61,9 @@ export async function previewPayment(actor: Actor, input: z.infer<typeof Preview
   const vehicle = await vehicleFrom(input);
   const v = vehicle.data()!;
   if (v.status !== "active") fail("failed-precondition", "vehicle_inactive", "This vehicle isn't taking Konduct payments right now. Please pay in cash.");
-  if (input.passengers > Math.min(RULES.maxPassengers, v.capacity ?? RULES.maxPassengers)) {
-    fail("invalid-argument", "too_many", "That's more passengers than this vehicle carries.");
-  }
+  const bus = countsSeats(v);
 
-  const [driver, route, wallet, recent] = await Promise.all([
+  const [driver, route, wallet, recent, fleet] = await Promise.all([
     v.driverUid ? db.doc(`users/${v.driverUid}`).get() : null,
     db.doc(`routes/${v.routeId}`).get(),
     db.doc(`wallets/${riderAccount(actor.uid)}`).get(),
@@ -74,7 +75,12 @@ export async function previewPayment(actor: Actor, input: z.infer<typeof Preview
       .orderBy("createdAtMs", "desc")
       .limit(1)
       .get(),
+    bus ? fleetRef().get() : null,
   ]);
+  const capacity = bus ? readFleet(fleet).busSeats : (v.capacity ?? RULES.maxPassengers);
+  if (input.passengers > Math.min(RULES.maxPassengers, capacity)) {
+    fail("invalid-argument", "too_many", "That's more passengers than this vehicle carries.");
+  }
   if (!driver?.exists || driver.get("status") !== "active" || driver.get("role") !== "driver") {
     fail("failed-precondition", "driver_inactive", "This driver isn't taking Konduct payments right now. Please pay in cash.");
   }
@@ -82,6 +88,8 @@ export async function previewPayment(actor: Actor, input: z.infer<typeof Preview
   if (!route.exists || route.get("active") !== true || switches.disabledRoutes.includes(route.id)) {
     fail("failed-precondition", "route_inactive", "Konduct payments are off on this route right now. Please pay in cash.");
   }
+  const seatsTaken = bus ? (liveLoad(v)?.taken ?? 0) : 0;
+  if (bus) assertSeats(capacity, seatsTaken, input.passengers);
 
   const fareKobo = route.get("fareKobo") as number;
   const totalKobo = fareKobo * input.passengers;
@@ -123,8 +131,19 @@ export async function previewPayment(actor: Actor, input: z.infer<typeof Preview
     recentlyPaidThisVehicle: Boolean(recentTx),
     // Warn when a sticker was swapped recently (SEC-QR-02).
     stickerChangedRecently: v.tokenVersion > 1 && Date.now() - issuedAt < 7 * 86_400_000,
+    // Seats paid by scan on this bus's current trip, before this payment (null: not a bus).
+    // Cash riders aren't counted, so the app shows what's left as an estimate.
+    seatCapacity: bus ? capacity : null,
+    seatsTaken,
+    // Where the driver says this trip goes, and about how long it takes (landmarks.ts).
+    tripRoute: tripRouteOf(v.currentRoute),
     expiresInMs: RULES.quoteTtlMs,
   };
+}
+
+/** The part of a bus's current route riders see and receipts keep. */
+function tripRouteOf(r: CurrentRoute | undefined) {
+  return r ? { from: r.fromName, to: r.toName, etaMin: r.etaMin } : null;
 }
 
 export const ConfirmInput = z.strictObject({
@@ -178,7 +197,7 @@ export async function confirmPayment(actor: Actor, input: z.infer<typeof Confirm
   let result: PayResult;
   try {
     result = await db.runTransaction(async (tx) => {
-      const [idem, qq, vehicle, driver, rider, route, daily, switchesSnap] = await tx.getAll(
+      const [idem, qq, vehicle, driver, rider, route, daily, switchesSnap, fleet] = await tx.getAll(
         idemRef,
         quoteRef,
         db.doc(`vehicles/${q.vehicleId}`),
@@ -187,6 +206,7 @@ export async function confirmPayment(actor: Actor, input: z.infer<typeof Confirm
         db.doc(`routes/${q.routeId}`),
         dailyRef(actor.uid),
         db.doc("config/switches"),
+        fleetRef(),
       );
       if (idem.exists) return idem.get("result") as PayResult;
       if (qq.get("status") !== "open") fail("failed-precondition", "quote_used", "This scan was already used. Scan again to pay.");
@@ -197,6 +217,16 @@ export async function confirmPayment(actor: Actor, input: z.infer<typeof Confirm
       if (driver.get("status") !== "active") fail("failed-precondition", "driver_inactive", "This driver isn't taking Konduct payments right now. Please pay in cash.");
       if (rider.get("status") !== "active") fail("permission-denied", "account_locked", "This account is on hold. Talk to a Konduct agent or support.");
       if (route.get("active") !== true || route.get("fareVersion") !== q.fareVersion) fail("failed-precondition", "fare_changed", "The fare changed. Scan again to see the new price.");
+
+      const tripRoute = tripRouteOf(vehicle.get("currentRoute"));
+
+      // Seats: re-checked here, where parallel scans of one bus are serialised on its document.
+      let load: Load | null = null;
+      if (countsSeats(vehicle.data())) {
+        const current = liveLoad(vehicle.data(), now);
+        assertSeats(readFleet(fleet).busSeats, current?.taken ?? 0, q.passengers);
+        load = boarded(current, q.passengers, now);
+      }
 
       // Limits by KYC tier, counting group payments in full (FR-WAL-06, FR-GRP-06).
       const lim = limitsFor(rider.get("kycTier"));
@@ -243,6 +273,12 @@ export async function confirmPayment(actor: Actor, input: z.infer<typeof Confirm
         driverConfirmedAt: null,
         undoUntilMs: r.undoUntilMs,
         quoteId: input.quoteId,
+        tripStartedAtMs: load?.tripStartedAtMs ?? null, // which bus trip these seats belong to (undo gives them back)
+        tripRoute,
+        driverFirstName: firstName(driver.get("fullName")),
+        // The rider can rate the driver once the trip should be over (ratings.ts).
+        rateFromMs: now + (tripRoute ? tripRoute.etaMin * 60_000 : RULES.rateWithoutRouteMs),
+        rating: null,
         createdAtMs: now,
         ...stamp(),
       });
@@ -268,6 +304,7 @@ export async function confirmPayment(actor: Actor, input: z.infer<typeof Confirm
         atMs: now,
         ...stamp(),
       });
+      if (load) tx.update(vehicle.ref, { load });
       tx.update(quoteRef, { status: "used", txId, ...touched() });
       tx.set(daily.ref, { uid: actor.uid, spendKobo: FieldValue.increment(q.totalKobo), pays: FieldValue.increment(1), ...touched() }, { merge: true });
       tx.create(idemRef, { uid: actor.uid, result: r, expireAt: new Date(now + 48 * 3_600_000), ...stamp() });
@@ -306,6 +343,7 @@ export async function undoPayment(actor: Actor, txId: string) {
       const { legs } = await reversalLegs(tx, txId);
       const daily = await tx.get(dailyRef(actor.uid));
       const trips = await tx.get(db.collection("trips").where("txId", "==", txId));
+      const vehicle = await tx.get(db.doc(`vehicles/${t.get("vehicleId")}`));
       const ledger = await prepare(tx, { txId: reversalId, type: "fare.undo", legs, reversalOf: txId });
       ledger.commit();
       markReversed(tx, txId, reversalId);
@@ -313,6 +351,9 @@ export async function undoPayment(actor: Actor, txId: string) {
       trips.docs.forEach((d) => tx.update(d.ref, { status: "void", ...touched() }));
       tx.update(db.doc(`driverFeed/${t.get("driverUid")}/items/${txId}`), { status: "undone", ...touched() });
       if (daily.exists) tx.update(daily.ref, { spendKobo: FieldValue.increment(-t.get("totalKobo")), ...touched() });
+      // The rider is off the bus: give the seats back if that trip is still going.
+      const load = alighted(liveLoad(vehicle.data()), t.get("passengers"), t.get("tripStartedAtMs"));
+      if (load) tx.update(vehicle.ref, { load });
       audit({ actor: actor.uid, action: "pay.undo", target: txRef.path, ip: actor.ip }, tx);
       return { ok: true, balanceKobo: ledger.balance(riderAccount(actor.uid)) };
     });

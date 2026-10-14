@@ -80,6 +80,23 @@ export const RULES = {
   offlineCodeTtlMs: 2 * 3_600_000,
   /** Refunds and manual adjustments above this need a second staff approval (FR-ADM-03). */
   makerCheckerAboveKobo: 500_000, // ₦5,000
+  /** Seats on every bus until an admin sets config/fleet. Scans past this are refused. Bikes keep their own capacity. */
+  defaultBusSeats: 7,
+  /** A bus's scanned seats clear when nobody has scanned for this long (the trip is over)... */
+  seatIdleResetMs: 15 * 60_000,
+  /** ...and at the latest this long after the trip's first scan. The driver's "New trip" clears them sooner. */
+  tripMaxMs: 45 * 60_000,
+  /** Highest bus count staff can report for one park. */
+  maxParkBuses: 500,
+  /** Trip estimates between two landmarks: straight line × roadFactor, at busSpeedKmh, plus stops. */
+  roadFactor: 1.35,
+  busSpeedKmh: 20,
+  tripStopMinutes: 2,
+  minTripMinutes: 3,
+  /** A rider can rate the driver from the trip's estimated arrival; without a trip route, this long after paying. */
+  rateWithoutRouteMs: 20 * 60_000,
+  /** ...and until this long after paying. */
+  rateWindowMs: 7 * 86_400_000,
 } as const;
 
 /** KYC tiers (FR-WAL-06). Tier 1 = phone + student ID. */

@@ -92,6 +92,26 @@ service cloud.firestore {
       allow read: if signedIn();
     }
 
+    // Seats per bus, for the driver's "3 of 7 seats paid" (domain/seats.ts).
+    match /config/fleet {
+      allow read: if signedIn();
+    }
+
+    // Parks and how many buses staff last counted there (domain/parks.ts).
+    match /parks/{parkId} {
+      allow read: if signedIn();
+    }
+
+    // Places drivers pick a trip route between (domain/landmarks.ts).
+    match /landmarks/{landmarkId} {
+      allow read: if signedIn();
+    }
+
+    // Riders' ratings and comments: staff only. Drivers see their average on users/{uid}.
+    match /ratings/{txId} {
+      allow read: if staffReader();
+    }
+
     // Operations queues: staff only.
     match /deposits/{id} { allow read: if staffReader(); }
     match /flags/{id} { allow read: if staffReader(); }

@@ -35,7 +35,8 @@ export const InviteDriver = z.strictObject({
   plate: z.string().max(16).transform((s) => s.trim().toUpperCase()).pipe(z.string().regex(/^[A-Z0-9 -]{5,16}$/)),
   type: z.enum(["shuttle", "bike"]),
   routeId: z.string().regex(/^[A-Za-z0-9_-]{3,40}$/),
-  capacity: z.number().int().min(1).max(30),
+  /** Bikes only. Buses all seat config/fleet.busSeats, which an admin sets once for the fleet. */
+  capacity: z.number().int().min(1).max(30).optional(),
   checks: z.strictObject({ idSeen: z.literal(true), vehiclePapersSeen: z.literal(true), unionConfirmed: z.literal(true) }),
 });
 
@@ -55,7 +56,7 @@ export async function inviteDriver(actor: Actor, input: z.infer<typeof InviteDri
     tx.set(vehicleRef, {
       plate: input.plate,
       type: input.type,
-      capacity: input.capacity,
+      capacity: input.type === "bike" ? (input.capacity ?? 1) : null,
       routeId: input.routeId,
       driverUid: null,
       ownerRef: null,

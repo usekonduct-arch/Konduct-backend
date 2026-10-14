@@ -1,12 +1,12 @@
 /**
  * Konduct backend: every endpoint the apps and consoles can reach.
  *
- *  Rider     registerRider (email + password sign-in), setTransactionPin, changePin, payPreview, payConfirm, payUndo,
+ *  Rider     registerRider (email + password sign-in), setTransactionPin, changePin, payPreview, payConfirm, payUndo, rateDriver,
  *            createTopUp, openDispute, lockMyAccount, registerDevice, riderSetPayoutAccount, riderWithdraw, payoutBanks
  *  Driver    claimDriverAccount (agent's one-time code), (setTransactionPin, changePin, lockMyAccount, registerDevice),
- *            driverConfirmOfflineCode, driverSetPayoutAccount, driverRequestPayout, payoutBanks
- *  Staff     staff* (MFA + role checked): onboarding, QR, routes, people, switches, approvals,
- *            disputes
+ *            driverConfirmOfflineCode, driverSetPayoutAccount, driverRequestPayout, driverNewTrip, driverSetRoute, payoutBanks
+ *  Staff     staff* (MFA + role checked): onboarding, QR, routes, parks, landmarks, trip routes, bus seats, people, switches,
+ *            approvals, disputes
  *  Bachs     bachsWebhook (HTTP, signature-verified)
  *  Jobs      dailyPayoutRun, reconcileDaily, reconcilePayoutsJob, disputeSlaWatch
  */
@@ -25,6 +25,10 @@ import { decide } from "./domain/approvals";
 import { OpenDispute, openDispute, ResolveDispute, resolveDispute, reviewDispute } from "./domain/disputes";
 import { createTopUp, TopUpInput } from "./domain/funding";
 import { ConfirmInput, confirmOfflineCode, confirmPayment, previewPayment, PreviewInput, undoPayment } from "./domain/pay";
+import { SetParkBuses, setParkBuses, UpsertPark, upsertPark } from "./domain/parks";
+import { DriverSetRoute, setVehicleRoute, StaffSetRoute, UpsertLandmark, upsertLandmark } from "./domain/landmarks";
+import { RateDriver, rateDriver } from "./domain/ratings";
+import { SetFleet, setFleet, startNewTrip } from "./domain/seats";
 import { listBanks, PayoutAccountInput, requestDriverPayout, requestRiderWithdrawal, setPayoutAccount, WithdrawInput } from "./domain/payouts";
 import {
   InviteDriver,
@@ -92,6 +96,9 @@ export const payUndo = callable(z.strictObject({ txId: z.string().max(60) }), as
 
 const createTopUp_ = callable(TopUpInput, async (req, data) => createTopUp(await requireMember(req, ["rider"]), data), { secrets: [BACHS_API_KEY] });
 
+/** After the trip's estimated time: 1 to 5 stars for the driver, once per ride. */
+const rateDriver_ = callable(RateDriver, async (req, data) => rateDriver(await requireMember(req, ["rider"]), data));
+
 const openDispute_ = callable(OpenDispute, async (req, data) => openDispute(await requireMember(req, ["rider"]), data));
 
 /** Students add a bank account (fresh sign-in + PIN, second-person approval) and withdraw their wallet to it. */
@@ -123,6 +130,15 @@ export const driverRequestPayout = callable(z.strictObject({ pin: z.string().max
   requestDriverPayout(await requireMember(req, ["driver"]), data.pin), { secrets: [BACHS_API_KEY] },
 );
 
+/** The bus has emptied: clear the seats paid by scan so the next riders can pay. */
+export const driverNewTrip = callable(Empty, async (req) => startNewTrip(await requireMember(req, ["driver"])));
+
+/** Where the bus goes on this trip (from one landmark to another); newTrip also clears the seats. */
+export const driverSetRoute = callable(DriverSetRoute, async (req, data) => {
+  const actor = await requireMember(req, ["driver"]);
+  return setVehicleRoute(actor, actor.user.vehicleId as string | undefined, data);
+});
+
 /* ------------------------------------------------------------------- staff */
 
 const uidField = z.string().regex(/^[A-Za-z0-9]{10,128}$/);
@@ -145,6 +161,22 @@ export const staffSetVehicleStatus = callable(z.strictObject({ vehicleId: idFiel
 );
 
 export const staffUpsertRoute = callable(UpsertRoute, async (req, data) => upsertRoute(await requireStaff(req, ["ops", "admin"]), data));
+
+export const staffUpsertPark = callable(UpsertPark, async (req, data) => upsertPark(await requireStaff(req, ["ops", "admin"]), data));
+
+/** Whoever is at the park keeps its bus count current. */
+export const staffSetParkBuses = callable(SetParkBuses, async (req, data) => setParkBuses(await requireStaff(req, ["agent", "marshal", "ops", "admin"]), data));
+
+/** Seats on every bus; scans past it are refused. */
+export const staffUpsertLandmark = callable(UpsertLandmark, async (req, data) => upsertLandmark(await requireStaff(req, ["admin"]), data));
+
+/** Staff at the park help a driver change their trip route. */
+export const staffSetVehicleRoute = callable(StaffSetRoute, async (req, data) => {
+  const { vehicleId, ...route } = data;
+  return setVehicleRoute(await requireStaff(req, ["agent", "marshal", "ops", "admin"]), vehicleId, route);
+});
+
+export const staffSetFleet = callable(SetFleet, async (req, data) => setFleet(await requireStaff(req, ["admin"]), data));
 
 export const staffSetUserStatus = callable(z.strictObject({ uid: uidField, status: z.enum(["active", "suspended"]), reason: z.string().min(3).max(200) }), async (req, data) =>
   setUserStatus(await requireStaff(req, ["support", "agent", "ops", "admin"]), data.uid, data.status, data.reason),
@@ -214,4 +246,5 @@ export {
   registerDevice_ as registerDevice,
   createTopUp_ as createTopUp,
   openDispute_ as openDispute,
+  rateDriver_ as rateDriver,
 };

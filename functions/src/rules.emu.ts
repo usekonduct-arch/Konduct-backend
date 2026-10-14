@@ -34,6 +34,11 @@ before(async () => {
     await setDoc(doc(db, "flags/f1"), { type: "velocity" });
     await setDoc(doc(db, "routes/r1"), { name: "Main Gate", fareKobo: 20000 });
     await setDoc(doc(db, "config/switches"), { paymentsPaused: false });
+    await setDoc(doc(db, "config/fleet"), { busSeats: 7 });
+    await setDoc(doc(db, "landmarks/gate"), { name: "Main gate", lat: 7.7553, lng: 4.5476, active: true });
+    await setDoc(doc(db, "ratings/fare_1"), { driverUid: "tunde", riderUid: "alice", stars: 2, comment: "Rough driving" });
+    await setDoc(doc(db, "parks/shasha"), { name: "Shasha park", location: "Shasha, Osogbo", busCount: 4, active: true });
+    await setDoc(doc(db, "vehicles/v1"), { plate: "OS 452 KJA", driverUid: "tunde", load: { taken: 3 } });
   });
 });
 
@@ -95,6 +100,34 @@ describe("drivers", () => {
     await assertSucceeds(getDoc(doc(db, "driverFeed/tunde/items/fare_1")));
     await assertFails(getDoc(doc(db, "transactions/fare_1")));
     await assertFails(getDoc(doc(as("bob"), "driverFeed/tunde/items/fare_1")));
+  });
+
+  test("see their own bus and its seats; riders don't", async () => {
+    await assertSucceeds(getDoc(doc(as("tunde", { role: "driver" }), "vehicles/v1")));
+    await assertFails(getDoc(doc(as("alice", { role: "rider" }), "vehicles/v1")));
+    await assertFails(updateDoc(doc(as("tunde", { role: "driver" }), "vehicles/v1"), { load: { taken: 0 } }));
+  });
+});
+
+describe("parks and seats per bus", () => {
+  test("anyone signed in reads them; nobody writes them from an app", async () => {
+    for (const db of [as("alice", { role: "rider" }), as("tunde", { role: "driver" })]) {
+      await assertSucceeds(getDoc(doc(db, "parks/shasha")));
+      await assertSucceeds(getDocs(query(collection(db, "parks"), where("active", "==", true))));
+      await assertSucceeds(getDoc(doc(db, "config/fleet")));
+      await assertSucceeds(getDoc(doc(db, "landmarks/gate")));
+      await assertFails(setDoc(doc(db, "landmarks/fake"), { name: "Fake", lat: 0, lng: 0, active: true }));
+      // Who wrote what about a driver is staff-only: not the rider who wrote it, not the driver.
+      await assertFails(getDoc(doc(db, "ratings/fare_1")));
+      await assertFails(setDoc(doc(db, "ratings/fare_2"), { driverUid: "tunde", stars: 1 }));
+      await assertFails(updateDoc(doc(db, "parks/shasha"), { busCount: 40 }));
+      await assertFails(setDoc(doc(db, "parks/fake"), { name: "Fake park", busCount: 9 }));
+      await assertFails(setDoc(doc(db, "config/fleet"), { busSeats: 30 }));
+    }
+    const anon = env.unauthenticatedContext().firestore();
+    await assertFails(getDoc(doc(anon, "landmarks/gate")));
+    await assertFails(getDoc(doc(anon, "parks/shasha")));
+    await assertFails(getDoc(doc(anon, "config/fleet")));
   });
 });
 

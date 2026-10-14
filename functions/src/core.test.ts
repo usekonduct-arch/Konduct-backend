@@ -7,6 +7,9 @@ import { makeVehicleToken, readVehicleToken } from "./domain/qr";
 import { canonical, cleanCode, hmacCode, randomCode } from "./lib/crypto";
 import { naira, toDecimal, toKobo } from "./lib/money";
 import { namesMatch } from "./domain/payouts";
+import { distanceKm, etaMinutes, roadKm } from "./domain/landmarks";
+import { alighted, assertSeats, boarded, countsSeats, liveLoad } from "./domain/seats";
+import { RULES } from "./config";
 
 const sign = (secret: string, ts: number, body: string) => createHmac("sha256", secret).update(`${ts}.${body}`).digest("hex");
 
@@ -80,4 +83,50 @@ test("bank account name must match the verified driver (FR-DRV-06)", () => {
   assert.ok(!namesMatch("Tunde Adebayo", "TUNDE OKAFOR"));
   assert.ok(!namesMatch("Tunde Adebayo", "KONDUCT PAYOUTS LTD"));
   assert.ok(!namesMatch("Tunde Adebayo", ""));
+});
+
+test("bus seats: a trip fills, can't overfill, gives seats back on undo and ends on its own", () => {
+  const t0 = 1_800_000_000_000;
+  const reasonOf = (fn: () => void) => {
+    try {
+      fn();
+      return "ok";
+    } catch (e) {
+      return (e as { details?: { reason?: string } }).details?.reason;
+    }
+  };
+  let load = boarded(null, 3, t0);
+  assert.deepEqual(load, { taken: 3, tripStartedAtMs: t0, expiresAtMs: t0 + RULES.seatIdleResetMs });
+  load = boarded(liveLoad({ load }, t0 + 60_000), 4, t0 + 60_000);
+  assert.equal(load.taken, 7);
+  assert.equal(load.tripStartedAtMs, t0); // same trip
+  assert.equal(reasonOf(() => assertSeats(7, 6, 1)), "ok");
+  assert.equal(reasonOf(() => assertSeats(7, 7, 1)), "bus_full");
+  assert.equal(reasonOf(() => assertSeats(7, 5, 3)), "not_enough_seats");
+  assert.equal(reasonOf(() => assertSeats(7, 9, 1)), "bus_full"); // seats cut below what's already paid
+  // Undo gives seats back on the same trip only.
+  assert.equal(alighted(load, 2, t0)?.taken, 5);
+  assert.equal(alighted(load, 9, t0)?.taken, 0);
+  assert.equal(alighted(load, 2, t0 - 1), null);
+  assert.equal(alighted(null, 2, t0), null);
+  // Idle too long: the bus counts as empty again.
+  assert.equal(liveLoad({ load }, load.expiresAtMs - 1)?.taken, 7);
+  assert.equal(liveLoad({ load }, load.expiresAtMs), null);
+  assert.equal(liveLoad({ load: { ...load, taken: 0 } }, t0), null);
+  assert.equal(liveLoad({}, t0), null);
+  // Scans keep a trip alive, but never past tripMaxMs from its first scan.
+  let busy = boarded(null, 1, t0);
+  for (let at = t0; at < t0 + RULES.tripMaxMs; at += 5 * 60_000) busy = boarded(liveLoad({ load: busy }, at), 0, at);
+  assert.equal(busy.expiresAtMs, t0 + RULES.tripMaxMs);
+  assert.ok(countsSeats({ type: "shuttle" }) && countsSeats({}) && !countsSeats({ type: "bike" }));
+});
+
+test("trip estimates come from the two landmarks' pins", () => {
+  const gate = { lat: 7.7553, lng: 4.5476 };
+  const shasha = { lat: 7.7743, lng: 4.5476 }; // 0.019° north ≈ 2.11 km
+  assert.ok(Math.abs(distanceKm(gate, shasha) - 2.11) < 0.02);
+  assert.equal(roadKm(gate, shasha), 2.9); // × 1.35 road factor
+  assert.equal(etaMinutes(gate, shasha), 11); // 2.85 km at 20 km/h = 8.6 min, + 2 min of stops, rounded up
+  assert.equal(etaMinutes(gate, shasha), etaMinutes(shasha, gate));
+  assert.equal(etaMinutes(gate, { lat: 7.7554, lng: 4.5476 }), RULES.minTripMinutes); // next door
 });

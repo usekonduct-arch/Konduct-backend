@@ -20,6 +20,10 @@ import { decide } from "./domain/approvals";
 import { onPayoutEvent, payoutDriver, requestRiderWithdrawal, setPayoutAccount } from "./domain/payouts";
 import { openDispute, resolveDispute, reviewDispute } from "./domain/disputes";
 import { reconcile } from "./domain/recon";
+import { setFleet, startNewTrip } from "./domain/seats";
+import { setParkBuses, upsertPark } from "./domain/parks";
+import { setVehicleRoute, upsertLandmark } from "./domain/landmarks";
+import { rateDriver } from "./domain/ratings";
 
 const evtId = () => `evt_${uniq("e")}`;
 
@@ -206,6 +210,183 @@ describe("scan to pay", () => {
     const other = await makeRider(0);
     assert.equal(await reason(undoPayment(other.actor, out.txId)), "bad_tx");
     assert.equal((await db.doc(`ledgerTx/${out.txId}`).get()).get("reversedBy"), `undo_${out.txId}`);
+  });
+});
+
+describe("bus seats by scan", () => {
+  const admin = () => actorFor(uniq("adm"), "admin", { role: "admin", status: "active" });
+  const seatsOf = async (vehicleId: string) => ((await db.doc(`vehicles/${vehicleId}`).get()).get("load")?.taken as number) ?? 0;
+
+  test("a bus sells at most its seats; the next scan is refused before any debit", async () => {
+    const d = await makeDriverWithVehicle(5_000); // ₦50: even a full bus stays under the PIN threshold
+    const a = await makeRider(100_000);
+    const b = await makeRider(100_000);
+    const c = await makeRider(100_000);
+    const first = await previewPayment(a.actor, { qr: d.token, passengers: 1 });
+    assert.equal(first.seatCapacity, 7);
+    assert.equal(first.seatsTaken, 0);
+    await pay(a, d.token, { passengers: 3 });
+    await pay(b, d.token, { passengers: 2 });
+    const q = await previewPayment(c.actor, { qr: d.token, passengers: 1 });
+    assert.equal(q.seatsTaken, 5);
+    assert.equal(await reason(previewPayment(c.actor, { qr: d.token, passengers: 3 })), "not_enough_seats");
+    await pay(c, d.token, { passengers: 2 });
+    assert.equal(await seatsOf(d.vehicleId), 7);
+    const late = await makeRider(100_000);
+    assert.equal(await reason(previewPayment(late.actor, { qr: d.token, passengers: 1 })), "bus_full");
+    assert.equal(await balance(riderAccount(late.uid)), 100_000);
+    assert.equal(await balance(driverAccount(d.uid)), 35_000);
+  });
+
+  test("parallel scans can't oversell a bus: the transaction re-checks the seats", async () => {
+    const d = await makeDriverWithVehicle(5_000);
+    const riders = await Promise.all(Array.from({ length: 5 }, () => makeRider(100_000)));
+    // Every rider previews an empty bus first, then all pay at once: 5 groups of 2 for 7 seats.
+    const quotes = await Promise.all(riders.map((r) => previewPayment(r.actor, { qr: d.token, passengers: 2 })));
+    const results = await Promise.allSettled(quotes.map((q, i) => confirmPayment(riders[i].actor, { quoteId: q.quoteId, idempotencyKey: keyOf(), repeatConfirmed: true })));
+    assert.equal(results.filter((x) => x.status === "fulfilled").length, 3);
+    for (const x of results) if (x.status === "rejected") assert.ok(["bus_full", "not_enough_seats"].includes((x.reason.details as any).reason));
+    assert.equal(await seatsOf(d.vehicleId), 6);
+    assert.equal(await balance(driverAccount(d.uid)), 30_000);
+  });
+
+  test("undo gives the seats back; the driver's New trip clears the bus", async () => {
+    const d = await makeDriverWithVehicle(5_000);
+    const a = await makeRider(100_000);
+    const b = await makeRider(100_000);
+    const out = await pay(a, d.token, { passengers: 4 });
+    await pay(b, d.token, { passengers: 3 });
+    assert.equal(await seatsOf(d.vehicleId), 7);
+    await undoPayment(a.actor, out.txId);
+    assert.equal(await seatsOf(d.vehicleId), 3);
+    await startNewTrip(d.actor);
+    assert.equal(await seatsOf(d.vehicleId), 0);
+    const q = await previewPayment(a.actor, { qr: d.token, passengers: 6 });
+    assert.equal(q.seatsTaken, 0);
+    // Another driver can't clear this bus.
+    const other = await makeDriverWithVehicle(5_000);
+    assert.equal(await reason(startNewTrip({ ...other.actor, user: { ...other.actor.user, vehicleId: d.vehicleId } })), "not_your_vehicle");
+  });
+
+  test("a trip nobody has scanned into for a while counts as an empty bus", async () => {
+    const d = await makeDriverWithVehicle(5_000);
+    const a = await makeRider(100_000);
+    await pay(a, d.token, { passengers: 6 });
+    await db.doc(`vehicles/${d.vehicleId}`).update({ "load.expiresAtMs": Date.now() - 1 });
+    const q = await previewPayment(a.actor, { qr: d.token, passengers: 5 });
+    assert.equal(q.seatsTaken, 0);
+    await confirmPayment(a.actor, { quoteId: q.quoteId, idempotencyKey: keyOf(), repeatConfirmed: true });
+    assert.equal(await seatsOf(d.vehicleId), 5);
+  });
+
+  test("the admin's seat count applies to every bus; bikes aren't counted", async () => {
+    const d = await makeDriverWithVehicle(5_000);
+    const a = await makeRider(100_000);
+    await setFleet(admin(), { busSeats: 4 });
+    try {
+      assert.equal((await previewPayment(a.actor, { qr: d.token, passengers: 1 })).seatCapacity, 4);
+      assert.equal(await reason(previewPayment(a.actor, { qr: d.token, passengers: 5 })), "too_many");
+      await pay(a, d.token, { passengers: 4 });
+      assert.equal(await reason(previewPayment(a.actor, { qr: d.token, passengers: 1 })), "bus_full");
+    } finally {
+      await setFleet(admin(), { busSeats: 7 });
+    }
+    const bike = await makeDriverWithVehicle(5_000);
+    await db.doc(`vehicles/${bike.vehicleId}`).update({ type: "bike", capacity: 1 });
+    const q = await previewPayment(a.actor, { qr: bike.token, passengers: 1 });
+    assert.equal(q.seatCapacity, null);
+    await pay(a, bike.token);
+    await pay(a, bike.token);
+    assert.equal(await seatsOf(bike.vehicleId), 0);
+  });
+});
+
+describe("parks", () => {
+  test("staff add a park, then keep its bus count, which never goes below zero", async () => {
+    const ops = actorFor(uniq("ops"), "ops", { role: "ops", status: "active" });
+    const marshal = actorFor(uniq("msh"), "marshal", { role: "marshal", status: "active" });
+    const parkId = uniq("park").toLowerCase();
+    const made = await upsertPark(ops, { parkId, name: "Shasha park", location: "Shasha junction, Osogbo", lat: 7.77, lng: 4.55, active: true });
+    assert.equal(made.created, true);
+    assert.equal((await db.doc(`parks/${parkId}`).get()).get("busCount"), 0);
+    assert.equal((await setParkBuses(marshal, { parkId, change: 1 })).busCount, 1);
+    assert.equal((await setParkBuses(marshal, { parkId, count: 6 })).busCount, 6);
+    assert.equal((await setParkBuses(marshal, { parkId, change: -1 })).busCount, 5);
+    assert.equal((await setParkBuses(marshal, { parkId, change: -20 })).busCount, 0);
+    const p = await db.doc(`parks/${parkId}`).get();
+    assert.equal(p.get("busCountBy"), marshal.uid);
+    assert.ok(Date.now() - p.get("busCountAtMs") < 60_000);
+    // Editing the park keeps its count.
+    await setParkBuses(marshal, { parkId, count: 3 });
+    assert.equal((await upsertPark(ops, { parkId, name: "Shasha motor park", location: "Shasha junction", lat: null, lng: null, active: true })).created, false);
+    assert.equal((await db.doc(`parks/${parkId}`).get()).get("busCount"), 3);
+    assert.equal(await reason(setParkBuses(marshal, { parkId: "no-such-park", change: 1 })), "no_park");
+  });
+});
+
+describe("trip routes and ratings", () => {
+  const admin = actorFor(uniq("adm"), "admin", { role: "admin", status: "active" });
+  const marshal = actorFor(uniq("msh"), "marshal", { role: "marshal", status: "active" });
+  const place = async (name: string, lat: number, lng: number) => {
+    const landmarkId = uniq("lm").toLowerCase();
+    await upsertLandmark(admin, { landmarkId, name, lat, lng, active: true });
+    return landmarkId;
+  };
+
+  test("the driver picks a route between landmarks; a new trip clears the seats; staff can change it", async () => {
+    const gate = await place("Main gate", 7.7553, 4.5476);
+    const shasha = await place("Shasha park", 7.7743, 4.5476);
+    const d = await makeDriverWithVehicle(5_000);
+    const r = await makeRider(100_000);
+    const route = await setVehicleRoute(d.actor, d.vehicleId, { fromId: shasha, toId: gate, newTrip: true });
+    assert.equal(route.etaMin, 11);
+    assert.equal(route.fromName, "Shasha park");
+    const q = await previewPayment(r.actor, { qr: d.token, passengers: 1 });
+    assert.deepEqual(q.tripRoute, { from: "Shasha park", to: "Main gate", etaMin: 11 });
+    await confirmPayment(r.actor, { quoteId: q.quoteId, idempotencyKey: keyOf(), repeatConfirmed: true });
+    const vehicle = async () => (await db.doc(`vehicles/${d.vehicleId}`).get()).data()!;
+    assert.equal((await vehicle()).load.taken, 1);
+
+    // Staff help: the route changes, the riders on board stay counted.
+    await setVehicleRoute(marshal, d.vehicleId, { fromId: gate, toId: shasha, newTrip: false });
+    assert.equal((await vehicle()).currentRoute.setByStaff, true);
+    assert.equal((await vehicle()).load.taken, 1);
+    // The driver's new trip, on the way back, starts with an empty bus.
+    await setVehicleRoute(d.actor, d.vehicleId, { fromId: shasha, toId: gate, newTrip: true });
+    assert.equal((await vehicle()).load, undefined);
+
+    const other = await makeDriverWithVehicle(5_000);
+    assert.equal(await reason(setVehicleRoute(other.actor, d.vehicleId, { fromId: gate, toId: shasha, newTrip: false })), "not_your_vehicle");
+    assert.equal(await reason(setVehicleRoute(d.actor, d.vehicleId, { fromId: gate, toId: "no-such-place", newTrip: false })), "no_landmark");
+  });
+
+  test("a rider rates the driver once, after the estimated arrival, and the driver sees only the average", async () => {
+    const a = await place("Senate", 7.7553, 4.5476);
+    const b = await place("Hostel", 7.7743, 4.5476);
+    const d = await makeDriverWithVehicle(5_000);
+    await setVehicleRoute(d.actor, d.vehicleId, { fromId: a, toId: b, newTrip: true });
+    const r = await makeRider(100_000);
+    const out = await pay(r, d.token);
+    const t = await db.doc(`transactions/${out.txId}`).get();
+    assert.ok(Math.abs(t.get("rateFromMs") - (t.get("createdAtMs") + 11 * 60_000)) < 1000);
+    assert.equal(t.get("driverFirstName"), "Tunde");
+    assert.equal(await reason(rateDriver(r.actor, { txId: out.txId, stars: 5, comment: "" })), "too_early");
+
+    await t.ref.update({ rateFromMs: Date.now() - 1 }); // the trip is over
+    const stranger = await makeRider(0);
+    assert.equal(await reason(rateDriver(stranger.actor, { txId: out.txId, stars: 1, comment: "" })), "bad_tx");
+    await rateDriver(r.actor, { txId: out.txId, stars: 4, comment: "Smooth ride" });
+    assert.equal(await reason(rateDriver(r.actor, { txId: out.txId, stars: 1, comment: "" })), "already_rated");
+    const driver = await db.doc(`users/${d.uid}`).get();
+    assert.equal(driver.get("ratingSum"), 4);
+    assert.equal(driver.get("ratingCount"), 1);
+    assert.equal((await db.doc(`ratings/${out.txId}`).get()).get("comment"), "Smooth ride");
+
+    // An undone payment can't be rated.
+    const undone = await pay(r, d.token);
+    await undoPayment(r.actor, undone.txId);
+    await db.doc(`transactions/${undone.txId}`).update({ rateFromMs: Date.now() - 1 });
+    assert.equal(await reason(rateDriver(r.actor, { txId: undone.txId, stars: 5, comment: "" })), "not_rateable");
   });
 });
 
