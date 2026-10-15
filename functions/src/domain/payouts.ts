@@ -17,8 +17,11 @@
 import { z } from "zod";
 
 import { DRIVER_CONTACT_EMAIL, RULES } from "../config";
-import { BachsError, createPayout, createRecipientAccount, createTransfer, getBanks, getDestination, getPayout, listDestinations, updateAccount } from "../bachs/client";
+import { logger } from "firebase-functions";
+
+import { BachsError, createDestination, createPayout, createRecipientAccount, createTransfer, getBanks, getDestination, getPayout, listDestinations, type PayoutDestination, updateAccount } from "../bachs/client";
 import { audit } from "../lib/audit";
+import { sha256 } from "../lib/crypto";
 import { db, millis, stamp, touched } from "../lib/db";
 import { fail, isHttpsError } from "../lib/errors";
 import { type Actor, rateLimit, requireRecentSignIn } from "../lib/guards";
@@ -64,7 +67,7 @@ export const PayoutAccountInput = z.strictObject({
  */
 export async function setPayoutAccount(actor: Actor, input: z.infer<typeof PayoutAccountInput>) {
   requireRecentSignIn(actor);
-  await rateLimit(actor.uid, "payoutacct", 3, 24 * 3_600_000);
+  await rateLimit(actor.uid, "payoutacct", 5, 24 * 3_600_000);
   await checkPin(actor.uid, input.pin);
 
   const userRef = db.doc(`users/${actor.uid}`);
@@ -88,23 +91,15 @@ export async function setPayoutAccount(actor: Actor, input: z.infer<typeof Payou
     });
   }
 
+  // Who the account belongs to (Bachs needs it before paying out). It doesn't decide the name check.
   const [first, ...rest] = String(actor.user.fullName).split(" ");
   try {
-    await updateAccount(bachsAccountId, {
-      fields: {
-        persons: [{ first_name: first, last_name: rest.join(" ") || first, relationship: { representative: true } }],
-        payout_destination: { currency: "NGN", type: "bank_account", account_number: input.accountNumber, bank_code: input.bankCode },
-      },
-    });
+    await updateAccount(bachsAccountId, { fields: { persons: [{ first_name: first, last_name: rest.join(" ") || first, relationship: { representative: true } }] } });
   } catch (e) {
-    if (e instanceof BachsError && !e.uncertain) fail("invalid-argument", "bank_rejected", "The bank couldn't confirm that account. Check the bank and number.");
-    throw e;
+    logger.warn("bachs person update failed", { code: e instanceof BachsError ? e.code : "?", requestId: e instanceof BachsError ? e.requestId : null });
   }
 
-  // Bachs resolves the account name at the bank when it registers the destination.
-  const list = await listDestinations(bachsAccountId);
-  const dest = (list.data ?? []).find((d) => d.account_number?.endsWith(input.accountNumber.slice(-4)) && d.bank_code === input.bankCode);
-  if (!dest) fail("unavailable", "bank_pending", "We're still confirming that account with the bank. Try again in a few minutes.");
+  const dest = await registerDestination(actor.uid, bachsAccountId, input.bankCode, input.accountNumber);
   const resolvedName = dest.account_name ?? "";
   const match = namesMatch(actor.user.fullName, resolvedName);
 
@@ -129,6 +124,49 @@ export async function setPayoutAccount(actor: Actor, input: z.infer<typeof Payou
   // FR-DRV-05 asks for SMS to old and new numbers; SMS goes out once a provider is chosen. Push now:
   await notify(actor.uid, "security.payout_account", { title: "New payout account requested", body: `****${input.accountNumber.slice(-4)} will be checked. Not you? Tell an agent now.`, critical: true });
   return { status: "pending_approval", accountName: resolvedName, nameMatches: match };
+}
+
+/** What Bachs said on the last bank-account attempt, kept on the profile so a failure can be explained. */
+const noteBankCheck = (uid: string, check: Record<string, unknown>) =>
+  db
+    .doc(`users/${uid}`)
+    .update({ bankCheck: { ...check, atMs: Date.now() } })
+    .catch(() => undefined);
+
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Registers the bank account at Bachs (POST /v1/payouts/destinations), which resolves the holder's
+ * name at the bank. If the name isn't in the reply yet, reads the destination back a few times.
+ */
+async function registerDestination(uid: string, accountId: string, bankCode: string, accountNumber: string): Promise<PayoutDestination> {
+  const key = `konduct-dest-${sha256(`${uid}|${bankCode}|${accountNumber}`).slice(0, 40)}`;
+  let dest: PayoutDestination | undefined;
+  try {
+    dest = await createDestination(accountId, { type: "bank_account", currency: "NGN", bank_code: bankCode, account_number: accountNumber }, key);
+  } catch (e) {
+    const code = e instanceof BachsError ? e.code : "UNKNOWN";
+    // Added before: it's already a destination, so find it.
+    if (e instanceof BachsError && (e.status === 409 || /EXIST|DUPLICATE/.test(code))) {
+      const list = await listDestinations(accountId);
+      dest = (list.data ?? []).find((d) => d.account_number?.endsWith(accountNumber.slice(-4)) && d.bank_code === bankCode);
+    }
+    if (!dest) {
+      await noteBankCheck(uid, { step: "register", code, detail: e instanceof BachsError ? e.detail.slice(0, 200) : String(e).slice(0, 200), requestId: e instanceof BachsError ? e.requestId : null });
+      if (e instanceof BachsError && e.uncertain) fail("unavailable", "bank_unreachable", "We couldn't reach the bank just now. Try again in a minute.");
+      if (/ROUTING|ACCOUNT_NUMBER|REJECTED|INVALID|NOT_FOUND|RESOLVE/.test(code)) {
+        fail("invalid-argument", "bank_rejected", "The bank couldn't find that account. Check the bank and the 10-digit number.");
+      }
+      fail("failed-precondition", "bank_error", `The bank check didn't go through (${code}). Try again, or contact Konduct support.`);
+    }
+  }
+  for (let i = 0; i < 3 && !dest.account_name && dest.id; i++) {
+    await pause(1500);
+    dest = await getDestination(accountId, dest.id);
+  }
+  await noteBankCheck(uid, { step: "registered", status: dest.status ?? null, statusReason: dest.status_reason ?? null, usable: dest.is_usable ?? null, named: Boolean(dest.account_name) });
+  if (!dest.account_name) fail("unavailable", "bank_pending", "We're still confirming that account with the bank. Try again in a few minutes.");
+  return dest;
 }
 
 /** Run by approvals once a second person approves the account. */

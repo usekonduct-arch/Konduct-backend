@@ -632,6 +632,7 @@ describe("driver payouts via Bachs Connect", () => {
     onBachs("POST", "/v1/accounts", () => ({ json: { id: "acct_driver1" } }));
     onBachs("POST", "/v1/accounts/acct_driver1", () => ({ json: { id: "acct_driver1" } }));
     onBachs("GET", "/v1/payouts/destinations", () => ({ json: { data: [{ id: "pd_1", is_usable: true, status: "approved", account_name: "ADEBAYO TUNDE", account_number: "******6789", bank_code: "058" }] } }));
+    onBachs("POST", "/v1/payouts/destinations", () => ({ json: { id: "pd_1", is_usable: true, status: "approved", account_name: "ADEBAYO TUNDE", account_number: "******6789", bank_code: "058" } }));
     onBachs("GET", "/v1/payouts/destinations/pd_1", () => ({ json: { id: "pd_1", is_usable: true, status: "approved" } }));
 
     const stale = actorFor(d.uid, "driver", d.actor.user, Math.floor(Date.now() / 1000) - 3600);

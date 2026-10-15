@@ -102,7 +102,22 @@ export const updateAccount = (accountId: string, body: Record<string, unknown>) 
 
 export const getAccount = (accountId: string) => bachs<ConnectedAccount>("GET", `/v1/accounts/${encodeURIComponent(accountId)}`);
 
-export type PayoutDestination = { id: string; is_usable: boolean; status: string; account_name?: string; account_number?: string; bank_code?: string };
+export type PayoutDestination = {
+  id: string;
+  is_usable: boolean;
+  status: string;
+  status_reason?: string | null;
+  account_name?: string;
+  account_number?: string;
+  bank_code?: string;
+};
+
+/**
+ * Registers a bank account as the account's payout destination. For Nigerian banks Bachs
+ * resolves the holder's name at the bank during registration and returns it as account_name.
+ */
+export const createDestination = (accountId: string, body: Record<string, unknown>, idempotencyKey: string) =>
+  bachs<PayoutDestination>("POST", "/v1/payouts/destinations", body, { idempotencyKey, accountId });
 
 export const listDestinations = (accountId: string) =>
   bachs<{ data?: PayoutDestination[] } & Record<string, unknown>>("GET", "/v1/payouts/destinations", undefined, { accountId });
