@@ -7,6 +7,7 @@ import { getMessaging } from "firebase-admin/messaging";
 import { logger } from "firebase-functions";
 
 import { db, FieldValue, stamp } from "../lib/db";
+import { translate } from "./i18n";
 
 /**
  * Money alerts are spoken. Each kind has its own Android channel whose sound is a recorded voice
@@ -50,12 +51,14 @@ export async function notify(uid: string, kind: string, push: Push, opts: { push
       ...stamp(),
     });
     if (opts.push === false) return;
-    const devices = await db.collection(`users/${uid}/devices`).where("active", "==", true).limit(5).get();
+    const [devices, user] = await Promise.all([db.collection(`users/${uid}/devices`).where("active", "==", true).limit(5).get(), db.doc(`users/${uid}`).get()]);
     const tokens = devices.docs.map((d) => d.get("fcmToken") as string).filter(Boolean);
     if (!tokens.length) return;
+    // The inbox keeps English (the app translates it on screen); the push is in the person's language.
+    const lang = user.get("lang");
     const res = await getMessaging().sendEachForMulticast({
       tokens,
-      notification: { title: push.title, body: push.body, ...(push.imageUrl ? { imageUrl: push.imageUrl } : {}) },
+      notification: { title: translate(lang, push.title), body: translate(lang, push.body), ...(push.imageUrl ? { imageUrl: push.imageUrl } : {}) },
       data: { kind, popup: push.popup ? "1" : "0", ...(push.link ? { link: push.link } : {}), ...(push.data ?? {}) },
       android: {
         priority: "high",

@@ -2,7 +2,7 @@
  * Attack and integrity tests for the money paths, against the Firestore + Auth emulators
  * (SRS 9.3: concurrency, idempotency, replay, token tampering, failure handling).
  */
-import { actorFor, balance, bachsCalls, keyOf, makeDriverWithVehicle, makeRider, onBachs, resetBachs, setPin, uniq, webhook } from "./test/harness";
+import { actorFor, balance, bachsCalls, fund, keyOf, makeDriverWithVehicle, makeRider, onBachs, resetBachs, setPin, uniq, webhook } from "./test/harness";
 
 import { beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
@@ -34,6 +34,10 @@ import { setParkBuses, upsertPark } from "./domain/parks";
 import { setVehicleRoute, upsertLandmark } from "./domain/landmarks";
 import { rateDriver } from "./domain/ratings";
 import { openSupport, replySupport, sendSupport, setSupportStatus } from "./domain/support";
+import { sweepParkWatches, watchPark } from "./domain/alerts";
+import { applyReferral, myReferral, setReferrals } from "./domain/referrals";
+import { ratingFeedback } from "./domain/ratings";
+import { SetAppVersions, setAppVersions } from "./domain/appversion";
 
 const evtId = () => `evt_${uniq("e")}`;
 
@@ -1105,5 +1109,168 @@ describe("drivers' daily figures", () => {
     assert.equal(out.hashtag, "#RideKonduct");
     assert.equal((await db.doc("config/brand").get()).get("x"), "@konduct");
     assert.equal(SetBrand.safeParse({ instagram: "bad handle!", x: "", tiktok: "", facebook: "", hashtag: "", website: "" }).success, false);
+  });
+});
+
+describe("alerts riders asked for", () => {
+  const inbox = async (uid: string, kind: string) => (await db.collection(`users/${uid}/notifications`).where("kind", "==", kind).get()).docs.map((d) => d.data());
+
+  test("a fare that leaves too little for the same ride again warns the rider, once a day", async () => {
+    const d = await makeDriverWithVehicle(20_000);
+    const r = await makeRider(70_000);
+    await pay(r, d.token); // 50,000 left: fine
+    assert.equal((await inbox(r.uid, "wallet.low")).length, 0);
+    await pay(r, d.token); // 30,000 left: still one more ride
+    assert.equal((await inbox(r.uid, "wallet.low")).length, 0);
+    await pay(r, d.token); // 10,000 left: not enough
+    const warned = await inbox(r.uid, "wallet.low");
+    assert.equal(warned.length, 1);
+    assert.equal(warned[0].link, "app:topup");
+    assert.match(warned[0].body, /₦100 left, not enough for another ₦200 ride/);
+    // Topped up and drained again the same day: no second warning.
+    await fund(r.uid, 20_000);
+    await pay(r, d.token);
+    assert.equal((await inbox(r.uid, "wallet.low")).length, 1);
+  });
+
+  test("a rider waiting at a park hears about the next bus with seats, once; old watches lapse", async () => {
+    const d = await makeDriverWithVehicle(5_000);
+    const parkId = uniq("park");
+    await db.doc(`parks/${parkId}`).set({ name: "Shasha park", location: "Gate 2", active: true, busCount: 0, ...stamp() });
+    await rebuildBoard();
+    const r = await makeRider(0);
+    const late = await makeRider(0);
+    const w = await watchPark(r.actor, { parkId, on: true });
+    assert.equal(w.watching, true);
+    await watchPark(late.actor, { parkId, on: true });
+    await db.doc(`parkWatches/${parkId}__${late.uid}`).update({ expiresAtMs: Date.now() - 1 });
+
+    await setVehiclePark(d.actor, d.vehicleId, parkId);
+    const got = await inbox(r.uid, "park.bus");
+    assert.equal(got.length, 1);
+    assert.equal(got[0].title, "A bus is at Shasha park");
+    assert.match(got[0].body, /^OS 452 KJA has about \d+ seats free/);
+    assert.equal(got[0].link, `app:buses/${parkId}`);
+    assert.equal((await inbox(late.uid, "park.bus")).length, 0);
+    assert.equal((await db.doc(`parkWatches/${parkId}__${r.uid}`).get()).exists, false);
+
+    // The watch was used up: the next bus doesn't alert again.
+    const d2 = await makeDriverWithVehicle(5_000);
+    await setVehiclePark(d2.actor, d2.vehicleId, parkId);
+    assert.equal((await inbox(r.uid, "park.bus")).length, 1);
+
+    // Turning a watch off, the cap on parks at once, and unknown parks.
+    await watchPark(r.actor, { parkId, on: true });
+    await watchPark(r.actor, { parkId, on: false });
+    assert.equal((await db.doc(`parkWatches/${parkId}__${r.uid}`).get()).exists, false);
+    const parks: string[] = [];
+    for (const i of [1, 2, 3, 4]) {
+      const id = uniq(`pk${i}`);
+      await db.doc(`parks/${id}`).set({ name: `Park ${i}`, location: "", active: true, busCount: 0, ...stamp() });
+      parks.push(id);
+    }
+    for (const p of parks.slice(0, 3)) await watchPark(r.actor, { parkId: p, on: true });
+    assert.equal(await reason(watchPark(r.actor, { parkId: parks[3], on: true })), "too_many_watches");
+    assert.equal(await reason(watchPark(r.actor, { parkId: "no-such-park", on: true })), "no_park");
+
+    await db.doc(`parkWatches/${parks[0]}__${r.uid}`).update({ expiresAtMs: Date.now() - 1 });
+    assert.ok((await sweepParkWatches()).removed >= 1);
+    assert.equal((await db.doc(`parkWatches/${parks[0]}__${r.uid}`).get()).exists, false);
+  });
+});
+
+describe("referrals", () => {
+  const admin = () => actorFor(uniq("adm"), "admin", { role: "admin", status: "active" });
+  const on = (extra: Partial<{ bonusKobo: number; welcomeKobo: number; maxPerReferrer: number }> = {}) =>
+    setReferrals(admin(), { enabled: true, bonusKobo: 20_000, welcomeKobo: 10_000, maxPerReferrer: 20, reason: "pilot invite week", ...extra });
+
+  test("nothing happens while the programme is off", async () => {
+    await setReferrals(admin(), { enabled: false, bonusKobo: 0, welcomeKobo: 0, maxPerReferrer: 20, reason: "not running yet" });
+    const a = await makeRider(0);
+    const b = await makeRider(0);
+    const { code } = await myReferral(a.actor);
+    assert.match(code, /^[0-9A-Z]{6}$/);
+    assert.equal(await reason(applyReferral(b.actor, { code })), "referrals_off");
+    assert.equal(await reason(setReferrals(admin(), { enabled: true, bonusKobo: 0, welcomeKobo: 0, maxPerReferrer: 20, reason: "forgot the amounts" })), "no_reward");
+  });
+
+  test("a friend's first fare pays both of them once, from Konduct's promotions, on a verifiable ledger", async () => {
+    await on();
+    const d = await makeDriverWithVehicle(5_000);
+    const a = await makeRider(0);
+    const b = await makeRider(50_000);
+    const { code } = await myReferral(a.actor);
+    assert.equal((await myReferral(a.actor)).code, code, "the code is kept");
+    assert.equal(await reason(applyReferral(a.actor, { code })), "own_code");
+    assert.equal(await reason(applyReferral(b.actor, { code: "ZZZZZZ" })), "bad_code");
+    assert.equal((await myReferral(b.actor)).canApply, true);
+    await applyReferral(b.actor, { code: code.toLowerCase() });
+    assert.equal(await reason(applyReferral(b.actor, { code })), "already_applied");
+    assert.equal((await myReferral(b.actor)).canApply, false);
+    assert.equal(await balance(riderAccount(a.uid)), 0, "nothing until a real fare");
+
+    await pay(b, d.token);
+    assert.equal(await balance(riderAccount(a.uid)), 20_000);
+    assert.equal(await balance(riderAccount(b.uid)), 50_000 - 5_000 + 10_000);
+    assert.equal((await db.doc(`referrals/${b.uid}`).get()).get("status"), "rewarded");
+    assert.equal((await verifyAccount(riderAccount(a.uid))).ok, true);
+    assert.equal((await verifyAccount(riderAccount(b.uid))).ok, true);
+    assert.equal((await db.doc(`ledgerTx/referral_${b.uid}`).get()).get("type"), "promo.referral");
+    const mine = await myReferral(a.actor);
+    assert.equal(mine.rewarded, 1);
+    assert.equal(mine.earnedKobo, 20_000);
+
+    // Later fares pay nothing more.
+    await pay(b, d.token);
+    assert.equal(await balance(riderAccount(a.uid)), 20_000);
+
+    // Someone who has already ridden can't use a code.
+    const c = await makeRider(50_000);
+    await pay(c, d.token);
+    assert.equal(await reason(applyReferral(c.actor, { code })), "already_rode");
+  });
+
+  test("past the referrer's limit, the new rider still gets the welcome but the referrer doesn't", async () => {
+    await on({ maxPerReferrer: 1 });
+    const d = await makeDriverWithVehicle(5_000);
+    const a = await makeRider(0);
+    const { code } = await myReferral(a.actor);
+    for (let i = 0; i < 2; i++) {
+      const b = await makeRider(50_000);
+      await applyReferral(b.actor, { code });
+      await pay(b, d.token);
+      assert.equal(await balance(riderAccount(b.uid)), 50_000 - 5_000 + 10_000);
+    }
+    assert.equal(await balance(riderAccount(a.uid)), 20_000);
+    await on();
+  });
+});
+
+describe("drivers' rating feedback and app versions", () => {
+  test("a driver sees stars and comments by day, never who or which trip", async () => {
+    const d = await makeDriverWithVehicle(5_000);
+    const r = await makeRider(100_000);
+    for (const [stars, comment] of [[5, "Very polite"], [3, ""]] as const) {
+      const out = await pay(r, d.token);
+      await db.doc(`transactions/${out.txId}`).update({ rateFromMs: Date.now() - 1 });
+      await rateDriver(r.actor, { txId: out.txId, stars, comment });
+    }
+    const driver = (await db.doc(`users/${d.uid}`).get()).data()!;
+    const fb = await ratingFeedback(actorFor(d.uid, "driver", driver));
+    assert.equal(fb.count, 2);
+    assert.equal(fb.average, 4);
+    assert.deepEqual(fb.recentStars, [0, 0, 1, 0, 1]);
+    assert.equal(fb.recent.length, 2);
+    assert.deepEqual(Object.keys(fb.recent[0]).sort(), ["comment", "day", "stars"]);
+    assert.ok(fb.recent.some((x) => x.comment === "Very polite"));
+    assert.equal(fb.recent[0].day, lagosDay());
+  });
+
+  test("admins set the oldest allowed build; the latest can't be below it", async () => {
+    const a = actorFor(uniq("adm"), "admin", { role: "admin", status: "active" });
+    await setAppVersions(a, { rider: { minBuild: 4, latestBuild: 6, updateUrl: "https://konduct.app/get" }, reason: "undo bug fix" });
+    assert.equal((await db.doc("config/app").get()).get("rider").minBuild, 4);
+    assert.equal(SetAppVersions.safeParse({ driver: { minBuild: 9, latestBuild: 2, updateUrl: "https://konduct.app/get" }, reason: "typo test" }).success, false);
+    assert.equal(SetAppVersions.safeParse({ driver: { minBuild: 1, latestBuild: 2, updateUrl: "http://konduct.app/get" }, reason: "insecure link" }).success, false);
   });
 });

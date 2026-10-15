@@ -1,14 +1,15 @@
 /**
  * Riders rate the driver after a ride: once per paid fare, from the trip's estimated arrival
  * (transactions/{id}.rateFromMs, set at payment) until RULES.rateWindowMs after paying. The
- * rating and comment go to ratings/{txId}, which only staff read; the driver sees their average
- * (users/{uid}.ratingSum / ratingCount), never who said what.
+ * rating and comment go to ratings/{txId}, which only staff read directly; the driver sees their average
+ * (users/{uid}.ratingSum / ratingCount) and, through ratingFeedback, recent stars and comments
+ * without who said them.
  */
 import { z } from "zod";
 
 import { RULES } from "../config";
 import { audit } from "../lib/audit";
-import { db, FieldValue, stamp } from "../lib/db";
+import { db, FieldValue, lagosDay, stamp } from "../lib/db";
 import { fail } from "../lib/errors";
 import { type Actor, rateLimit } from "../lib/guards";
 import { refreshBoardQuietly } from "./board";
@@ -52,4 +53,29 @@ export async function rateDriver(actor: Actor, input: z.infer<typeof RateDriver>
   });
   await refreshBoardQuietly(vehicleId);
   return { stars: input.stars };
+}
+
+/**
+ * What riders said, for the driver: their stars by count and the latest ratings with any comment.
+ * Never the rider, the plate, the route or the time of day, only the Lagos date, so a comment
+ * can't be traced back to one trip. Riders are told the driver won't see their name.
+ */
+export async function ratingFeedback(actor: Actor) {
+  await rateLimit(actor.uid, "ratingFeedback", 30, 60_000);
+  const recent = await db.collection("ratings").where("driverUid", "==", actor.uid).orderBy("createdAtMs", "desc").limit(RULES.feedbackShown).get();
+  const user = actor.user;
+  const count = Number(user.ratingCount ?? 0);
+  const stars = [0, 0, 0, 0, 0];
+  for (const d of recent.docs) stars[Math.min(5, Math.max(1, Number(d.get("stars")))) - 1] += 1;
+  return {
+    average: count ? Math.round((Number(user.ratingSum ?? 0) / count) * 10) / 10 : null,
+    count,
+    /** How the recent ratings split, one star to five. */
+    recentStars: stars,
+    recent: recent.docs.map((d) => ({
+      stars: Number(d.get("stars")),
+      comment: String(d.get("comment") ?? ""),
+      day: lagosDay(Number(d.get("createdAtMs"))),
+    })),
+  };
 }

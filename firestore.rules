@@ -128,6 +128,22 @@ service cloud.firestore {
       allow read: if signedIn();
     }
 
+    // Oldest app build still allowed and the latest one (domain/appversion.ts). Public: the apps
+    // check it before anyone signs in, and it holds nothing private.
+    match /config/app {
+      allow read: if true;
+    }
+
+    // Referral rewards on/off and amounts, for the invite card (domain/referrals.ts).
+    match /config/referrals {
+      allow read: if signedIn();
+    }
+
+    // "Tell me when a bus is here" (domain/alerts.ts): a rider sees their own; the server writes them.
+    match /parkWatches/{id} {
+      allow read: if signedIn() && resource.data.uid == me();
+    }
+
     // Parks and how many buses staff last counted there (domain/parks.ts).
     match /parks/{parkId} {
       allow read: if signedIn();
@@ -156,7 +172,8 @@ service cloud.firestore {
       }
     }
 
-    // Riders' ratings and comments: staff only. Drivers see their average on users/{uid}.
+    // Riders' ratings and comments: staff only. Drivers see their average on users/{uid}, and recent
+    // stars and comments without who left them through driverRatingFeedback.
     match /ratings/{txId} {
       allow read: if staffReader();
     }
@@ -191,6 +208,6 @@ service cloud.firestore {
     }
 
     // Everything else (pins, studentIds, fundingCodes, payerAccounts, payQuotes, idempotency,
-    // rateLimits, dailyTotals, connectAccounts, devices, ...) has no rule and is denied.
+    // rateLimits, dailyTotals, connectAccounts, devices, referralCodes, referrals, ...) has no rule and is denied.
   }
 }

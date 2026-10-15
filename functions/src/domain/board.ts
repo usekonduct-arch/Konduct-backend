@@ -20,6 +20,7 @@ import { audit } from "../lib/audit";
 import { db, FieldValue, touched } from "../lib/db";
 import { fail } from "../lib/errors";
 import { type Actor, rateLimit } from "../lib/guards";
+import { alertParkWatchers } from "./alerts";
 import type { CurrentRoute } from "./landmarks";
 import { countsSeats, fleetRef, liveLoad, readFleet } from "./seats";
 
@@ -118,5 +119,7 @@ export async function setVehiclePark(actor: Actor, vehicleId: string | undefined
     return park ? { parkId: park.id, parkName: park.name, expiresAtMs: park.expiresAtMs } : { parkId: null, parkName: null, expiresAtMs: null };
   });
   await refreshBoardQuietly(vehicleId);
+  // Riders waiting at this park hear about the bus (alerts.ts reads the entry just rebuilt).
+  if (result.parkId) await alertParkWatchers(result.parkId, vehicleId);
   return result;
 }

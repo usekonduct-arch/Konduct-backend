@@ -30,6 +30,7 @@ export const PLATFORM = {
   losses: "platform_losses", // expense: refunds Konduct covered
   revenue: "platform_revenue", // income: fees Konduct charges
   adjustments: "platform_adjustments", // equity: approved manual corrections
+  promotions: "platform_promotions", // expense: referral rewards and other credit Konduct gives away
 } as const;
 
 const PLATFORM_NORMAL: Record<string, Side> = {
@@ -40,6 +41,7 @@ const PLATFORM_NORMAL: Record<string, Side> = {
   [PLATFORM.losses]: "debit",
   [PLATFORM.revenue]: "credit",
   [PLATFORM.adjustments]: "debit",
+  [PLATFORM.promotions]: "debit",
 };
 
 export const riderAccount = (uid: string) => `rider_${uid}`;

@@ -1,6 +1,14 @@
 {
   "indexes": [
     {
+      "collectionGroup": "ratings",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "driverUid", "order": "ASCENDING" },
+        { "fieldPath": "createdAtMs", "order": "DESCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "broadcasts",
       "queryScope": "COLLECTION",
       "fields": [

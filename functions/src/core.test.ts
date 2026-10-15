@@ -147,3 +147,22 @@ test("numbers wrapped by the Android Firebase SDK are unwrapped before validatio
   assert.throws(() => decodeCallableData({ "@type": "type.googleapis.com/google.protobuf.Any", value: "1" }));
   assert.throws(() => decodeCallableData({ "@type": "type.googleapis.com/google.protobuf.Int64Value", value: "abc" }));
 });
+
+test("push notifications follow the person's language and keep amounts, names and codes", async () => {
+  const { translate } = await import("./domain/i18n");
+  assert.equal(translate("yo", "₦1,200 added"), "₦1,200 ti wọlé");
+  assert.equal(translate("ha", "Low balance"), "Kuɗinku sun yi ƙasa");
+  assert.equal(translate("pcm", "₦600 received"), "You don collect ₦600");
+  // Parts joined with " · " are translated one by one; the reference stays as it is.
+  assert.equal(translate("yo", "3 riders · KD-7Q2MXA"), "Èrò 3 · KD-7Q2MXA");
+  assert.equal(translate("ha", "1 rider · KD-7Q2MXA"), "Fasinja 1 · KD-7Q2MXA");
+  assert.equal(
+    translate("pcm", "You have ₦100 left, not enough for another ₦200 ride. Top up before your next trip."),
+    "Na ₦100 remain, e no reach another ₦200 ride. Top up before your next trip.",
+  );
+  // English, unknown languages and staff-written text come back unchanged.
+  assert.equal(translate("en", "₦1,200 added"), "₦1,200 added");
+  assert.equal(translate("fr", "₦1,200 added"), "₦1,200 added");
+  assert.equal(translate(undefined, "Low balance"), "Low balance");
+  assert.equal(translate("yo", "Free rides all day Friday"), "Free rides all day Friday");
+});
