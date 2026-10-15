@@ -84,6 +84,8 @@ export const RULES = {
   seatIdleResetMs: 15 * 60_000,
   /** ...and at the latest this long after the trip's first scan. The driver's "New trip" clears them sooner. */
   tripMaxMs: 45 * 60_000,
+  /** A bus's park check-in lapses after this long if the driver forgets to tap "Leaving". */
+  parkCheckInMs: 2 * 3_600_000,
   /** Highest bus count staff can report for one park. */
   maxParkBuses: 500,
   /** Trip estimates between two landmarks: straight line × roadFactor, at busSpeedKmh, plus stops. */

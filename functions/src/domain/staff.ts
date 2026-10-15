@@ -12,6 +12,7 @@ import { fail } from "../lib/errors";
 import type { Actor } from "../lib/guards";
 import { cleanName, codeHash, emailKey, maskEmail, normalizeEmail, normalizeStudentId, studentIdKey } from "../identity";
 import { mergeClaims } from "./accounts";
+import { refreshBoardQuietly } from "./board";
 import { requestApproval } from "./approvals";
 import { makeVehicleToken } from "./qr";
 import { switchesRef } from "./policy";
@@ -124,6 +125,7 @@ export async function setVehicleStatus(actor: Actor, vehicleId: string, status: 
     tx.update(ref, { status, ...touched() });
     audit({ actor: actor.uid, action: "vehicle.status", target: ref.path, before: { status: v.get("status") }, after: { status }, ip: actor.ip }, tx);
   });
+  await refreshBoardQuietly(vehicleId);
   return { status };
 }
 
@@ -220,7 +222,10 @@ export async function updateUserDetails(actor: Actor, input: z.infer<typeof Upda
     tx.update(ref, { ...changes, ...touched() });
     audit({ actor: actor.uid, action: "user.edit", target: ref.path, before, after: changes, ip: actor.ip }, tx);
   });
-  if (typeof changes.fullName === "string") await mergeClaims(uid, { name: changes.fullName });
+  if (typeof changes.fullName === "string") {
+    await mergeClaims(uid, { name: changes.fullName });
+    if (role === "driver") await refreshBoardQuietly(u.get("vehicleId") as string | undefined);
+  }
   return { changed: Object.keys(changes).filter((k) => k !== "emailMasked") };
 }
 

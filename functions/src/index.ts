@@ -6,7 +6,7 @@
  *            createTopUp, refreshTopUps, openDispute, lockMyAccount, registerDevice, riderSetPayoutAccount, riderWithdraw, payoutBanks
  *  Both      receiptProof (verify a fare, top-up or payout against the ledger)
  *  Driver    claimDriverAccount (agent's one-time code), (setTransactionPin, changePin, lockMyAccount, registerDevice),
- *            driverConfirmOfflineCode, driverSetPayoutAccount, driverRequestPayout, driverNewTrip, driverSetRoute, payoutBanks
+ *            driverConfirmOfflineCode, driverSetPayoutAccount, driverRequestPayout, driverNewTrip, driverSetRoute, driverSetPark, payoutBanks
  *  Staff     staff* (MFA + role checked): onboarding, staff accounts (staffAddStaff, staffRevokeStaff, ...), editing people, QR, routes, parks, landmarks, trip routes, bus seats, support, people, switches,
  *            approvals, disputes, notifications (staffSendNotice, staffSetBroadcast), ads (staffUpsertAd, staffDeleteAd),
  *            images (staffUploadMedia)
@@ -38,6 +38,7 @@ import { DriverSetRoute, setVehicleRoute, StaffSetRoute, UpsertLandmark, upsertL
 import { RateDriver, rateDriver } from "./domain/ratings";
 import { openSupport, replySupport, sendSupport, setSupportStatus, StaffSupportReply, StaffSupportStatus, SupportOpen, SupportSend } from "./domain/support";
 import { SetFleet, setFleet, startNewTrip } from "./domain/seats";
+import { DriverSetPark, rebuildBoard, refreshBoardQuietly, setVehiclePark, StaffSetPark } from "./domain/board";
 import { listBanks, PayoutAccountInput, requestDriverPayout, requestRiderWithdrawal, setPayoutAccount, WithdrawInput } from "./domain/payouts";
 import {
   InviteDriver,
@@ -165,12 +166,25 @@ export const driverRequestPayout = callable(z.strictObject({ pin: z.string().max
 );
 
 /** The bus has emptied: clear the seats paid by scan so the next riders can pay. */
-export const driverNewTrip = callable(Empty, async (req) => startNewTrip(await requireMember(req, ["driver"])));
+export const driverNewTrip = callable(Empty, async (req) => {
+  const actor = await requireMember(req, ["driver"]);
+  const out = await startNewTrip(actor);
+  await refreshBoardQuietly(actor.user.vehicleId as string | undefined);
+  return out;
+});
+
+/** The bus has arrived at a park (parkId) or is leaving it (null): riders see it on the board. */
+export const driverSetPark = callable(DriverSetPark, async (req, data) => {
+  const actor = await requireMember(req, ["driver"]);
+  return setVehiclePark(actor, actor.user.vehicleId as string | undefined, data.parkId);
+});
 
 /** Where the bus goes on this trip (from one landmark to another); newTrip also clears the seats. */
 export const driverSetRoute = callable(DriverSetRoute, async (req, data) => {
   const actor = await requireMember(req, ["driver"]);
-  return setVehicleRoute(actor, actor.user.vehicleId as string | undefined, data);
+  const route = await setVehicleRoute(actor, actor.user.vehicleId as string | undefined, data);
+  await refreshBoardQuietly(actor.user.vehicleId as string | undefined);
+  return route;
 });
 
 /* ------------------------------------------------------------------- staff */
@@ -207,14 +221,25 @@ export const staffUpsertLandmark = callable(UpsertLandmark, async (req, data) =>
 /** Staff at the park help a driver change their trip route. */
 export const staffSetVehicleRoute = callable(StaffSetRoute, async (req, data) => {
   const { vehicleId, ...route } = data;
-  return setVehicleRoute(await requireStaff(req, ["agent", "marshal", "ops", "admin"]), vehicleId, route);
+  const out = await setVehicleRoute(await requireStaff(req, ["agent", "marshal", "ops", "admin"]), vehicleId, route);
+  await refreshBoardQuietly(vehicleId);
+  return out;
 });
+
+/** Staff at the park check a bus in or out for its driver. */
+export const staffSetVehiclePark = callable(StaffSetPark, async (req, data) =>
+  setVehiclePark(await requireStaff(req, ["agent", "marshal", "ops", "admin"]), data.vehicleId, data.parkId),
+);
 
 export const staffSupportReply = callable(StaffSupportReply, async (req, data) => replySupport(await requireStaff(req, ["support", "ops", "admin"]), data));
 
 export const staffSupportSetStatus = callable(StaffSupportStatus, async (req, data) => setSupportStatus(await requireStaff(req, ["support", "ops", "admin"]), data));
 
-export const staffSetFleet = callable(SetFleet, async (req, data) => setFleet(await requireStaff(req, ["admin"]), data));
+export const staffSetFleet = callable(SetFleet, async (req, data) => {
+  const out = await setFleet(await requireStaff(req, ["admin"]), data);
+  await rebuildBoard(); // every bus's seat count changed
+  return out;
+});
 
 export const staffSetUserStatus = callable(z.strictObject({ uid: uidField, status: z.enum(["active", "suspended"]), reason: z.string().min(3).max(200) }), async (req, data) =>
   setUserStatus(await requireStaff(req, ["support", "agent", "ops", "admin"]), data.uid, data.status, data.reason),

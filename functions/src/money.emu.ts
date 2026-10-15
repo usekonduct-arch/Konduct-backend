@@ -17,7 +17,7 @@ import { createTopUp, reconcileTopUps, refreshTopUps } from "./domain/funding";
 import { lookUpReceipt, receiptProof } from "./domain/receipts";
 import { deleteAd, sendNotice, uploadMedia, upsertAd } from "./domain/messaging";
 import { handleBachsWebhook } from "./bachs/webhook";
-import { setUserStatus, issueVehicleQr, inviteDriver, resetDriverCode, requestAdjustment, requestKycTier, UpdateUser, updateUserDetails } from "./domain/staff";
+import { setVehicleStatus, setUserStatus, issueVehicleQr, inviteDriver, resetDriverCode, requestAdjustment, requestKycTier, UpdateUser, updateUserDetails } from "./domain/staff";
 import { addStaff, markPasswordChosen, resetStaffPassword, revokeStaff, setStaffRole } from "./domain/team";
 import { claimDriverAccount } from "./domain/accounts";
 import { memberToken } from "./lib/guards";
@@ -25,7 +25,8 @@ import { decide } from "./domain/approvals";
 import { onPayoutEvent, payoutDriver, requestRiderWithdrawal, setPayoutAccount } from "./domain/payouts";
 import { openDispute, resolveDispute, reviewDispute } from "./domain/disputes";
 import { reconcile } from "./domain/recon";
-import { setFleet, startNewTrip } from "./domain/seats";
+import { fleetRef, readFleet, setFleet, startNewTrip } from "./domain/seats";
+import { rebuildBoard, refreshBoard, setVehiclePark } from "./domain/board";
 import { setParkBuses, upsertPark } from "./domain/parks";
 import { setVehicleRoute, upsertLandmark } from "./domain/landmarks";
 import { rateDriver } from "./domain/ratings";
@@ -975,5 +976,53 @@ describe("people and staff accounts (admin)", () => {
     assert.deepEqual(keys, [nextId]);
     assert.equal(await reason(updateUserDetails(admin(), { uid: other.uid, studentId: nextId })), "student_id_taken");
     assert.equal(await reason(updateUserDetails(admin(), { uid: other.uid, email: newEmail })), "email_taken");
+  });
+});
+
+describe("the riders' bus board", () => {
+  const admin = () => actorFor(uniq("adm"), "admin", { role: "admin", status: "active" });
+  const entry = async (vehicleId: string) => (await db.doc(`liveBuses/${vehicleId}`).get()).data();
+
+  test("a bus checks in at a park, fills by scan, leaves; riders see it all without driver ids", async () => {
+    const d = await makeDriverWithVehicle(5_000);
+    const parkId = uniq("park");
+    await db.doc(`parks/${parkId}`).set({ name: "Shasha park", location: "Gate 2", active: true, busCount: 0, ...stamp() });
+    await rebuildBoard();
+    const seats = readFleet(await fleetRef().get()).busSeats;
+    let e = await entry(d.vehicleId);
+    assert.equal(e?.plate, "OS 452 KJA");
+    assert.equal(e?.driverFirstName, "Tunde");
+    assert.equal(e?.capacity, seats);
+    assert.equal(e?.seatsTaken, 0);
+    assert.equal(e?.park, null);
+    assert.equal(e?.fareKobo, 5_000);
+    assert.equal(e?.driverUid, undefined);
+    assert.equal(e?.shortCode, undefined);
+
+    const other = await makeDriverWithVehicle(5_000);
+    assert.equal(await reason(setVehiclePark(other.actor, d.vehicleId, parkId)), "not_your_vehicle");
+    await setVehiclePark(d.actor, d.vehicleId, parkId);
+    e = await entry(d.vehicleId);
+    assert.equal(e?.park.name, "Shasha park");
+
+    const r = await makeRider(100_000);
+    await pay(r, d.token, { passengers: 3 });
+    e = await entry(d.vehicleId);
+    assert.equal(e?.seatsTaken, 3);
+    assert.ok(e?.seatsResetAtMs > Date.now());
+
+    await setVehiclePark(d.actor, d.vehicleId, null);
+    assert.equal((await entry(d.vehicleId))?.park, null);
+
+    // A check-in the driver forgot about lapses on its own.
+    await setVehiclePark(d.actor, d.vehicleId, parkId);
+    await db.doc(`vehicles/${d.vehicleId}`).update({ "park.expiresAtMs": Date.now() - 1 });
+    await refreshBoard(d.vehicleId);
+    assert.equal((await entry(d.vehicleId))?.park, null);
+
+    // Suspended buses drop off the board.
+    await setVehicleStatus(admin(), d.vehicleId, "suspended");
+    assert.equal(await entry(d.vehicleId), undefined);
+    assert.equal(await reason(setVehiclePark(d.actor, d.vehicleId, parkId)), "vehicle_inactive");
   });
 });

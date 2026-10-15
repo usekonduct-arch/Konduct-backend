@@ -11,6 +11,7 @@ import { audit } from "../lib/audit";
 import { db, FieldValue, stamp } from "../lib/db";
 import { fail } from "../lib/errors";
 import { type Actor, rateLimit } from "../lib/guards";
+import { refreshBoardQuietly } from "./board";
 
 export const RateDriver = z.strictObject({
   txId: z.string().regex(/^fare_[A-Za-z0-9_-]{8,40}$/),
@@ -23,7 +24,7 @@ export async function rateDriver(actor: Actor, input: z.infer<typeof RateDriver>
   const txRef = db.doc(`transactions/${input.txId}`);
   const ratingRef = db.doc(`ratings/${input.txId}`);
   const now = Date.now();
-  await db.runTransaction(async (tx) => {
+  const vehicleId = await db.runTransaction(async (tx) => {
     const [t, existing] = await tx.getAll(txRef, ratingRef);
     if (!t.exists || t.get("payerUid") !== actor.uid) fail("not-found", "bad_tx", "We couldn't find that ride.");
     if (t.get("status") !== "completed") fail("failed-precondition", "not_rateable", "You can only rate rides that went ahead.");
@@ -47,6 +48,8 @@ export async function rateDriver(actor: Actor, input: z.infer<typeof RateDriver>
     tx.update(txRef, { rating: input.stars, ratedAtMs: now });
     tx.set(db.doc(`users/${driverUid}`), { ratingSum: FieldValue.increment(input.stars), ratingCount: FieldValue.increment(1) }, { merge: true });
     audit({ actor: actor.uid, action: "driver.rate", target: ratingRef.path, after: { stars: input.stars, driverUid }, ip: actor.ip }, tx);
+    return t.get("vehicleId") as string | undefined;
   });
+  await refreshBoardQuietly(vehicleId);
   return { stars: input.stars };
 }

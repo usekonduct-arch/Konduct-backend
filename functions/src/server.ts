@@ -27,6 +27,7 @@ import { handleMediaRequest } from "./domain/messaging";
 import { safeEqual } from "./lib/crypto";
 import { auth } from "./lib/db";
 import { JOBS } from "./jobs";
+import { rebuildBoard } from "./domain/board";
 import * as endpoints from "./index";
 
 const REQUIRED_ENV = [
@@ -173,4 +174,10 @@ app.use((err: Error & { status?: number }, _req: express.Request, res: Response,
 });
 
 const port = Number(process.env.PORT ?? 8080);
-app.listen(port, () => logger.info("konduct backend listening", { port, callables: callables.size, appCheck: ENFORCE_APP_CHECK }));
+app.listen(port, () => {
+  logger.info("konduct backend listening", { port, callables: callables.size, appCheck: ENFORCE_APP_CHECK });
+  // Bring the riders' bus board up to date with anything that changed while the server was down.
+  rebuildBoard()
+    .then((r) => logger.info("bus board rebuilt", r))
+    .catch((e) => logger.error("bus board rebuild failed", { err: (e as Error).message }));
+});

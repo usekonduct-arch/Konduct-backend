@@ -13,6 +13,7 @@ import { fail } from "../lib/errors";
 import { rateLimit } from "../lib/guards";
 import { driverAccount, openAccountWrite, riderAccount } from "../ledger/ledger";
 import { hashPin, isPinShape, isWeakPin, verifyPin } from "../pin";
+import { refreshBoardQuietly } from "./board";
 
 /** Merges into existing custom claims; claims are the app's offline view of role and progress. */
 export async function mergeClaims(uid: string, patch: Record<string, unknown>) {
@@ -148,6 +149,7 @@ export async function claimDriverAccount(uid: string, email: string, existingRol
   }
   const d = result.d;
   if (existingRole !== "driver") await mergeClaims(uid, { role: "driver", campus: CAMPUS_ID, name: d.fullName, status: "active", pin: false });
+  await refreshBoardQuietly(d.vehicleId); // the bus has a driver now: it goes on the riders' board
   return { invited: true, fullName: d.fullName, plate: d.plate, vehicleType: d.vehicleType, route: d.routeName ?? "" };
 }
 

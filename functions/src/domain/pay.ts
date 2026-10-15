@@ -24,6 +24,7 @@ import { type Actor, rateLimit } from "../lib/guards";
 import { naira } from "../lib/money";
 import { driverAccount, InsufficientFunds, prepare, riderAccount } from "../ledger/ledger";
 import { checkPin } from "./accounts";
+import { refreshBoardQuietly } from "./board";
 import { notify } from "./notify";
 import { assertOpen, dailyRef, getSwitches, limitsFor, readDaily } from "./policy";
 import { readVehicleToken } from "./qr";
@@ -327,6 +328,8 @@ export async function confirmPayment(actor: Actor, input: z.infer<typeof Confirm
   if (q.recentPaidAtMs && now - q.recentPaidAtMs < 60_000) {
     await db.collection("flags").add({ type: "possible_duplicate", uid: actor.uid, txId: result.txId, vehicleId: q.vehicleId, status: "open", ...stamp() });
   }
+  // Riders watching the board see the seats go.
+  await refreshBoardQuietly(q.vehicleId);
   const riders = q.passengers === 1 ? "1 rider" : `${q.passengers} riders`;
   await notify(q.driverUid, "fare.received", { title: `${naira(q.totalKobo)} received`, body: `${riders} · ${reference}`, data: { txId: result.txId, amountKobo: String(q.totalKobo), riders: String(q.passengers) }, critical: true });
   return result;

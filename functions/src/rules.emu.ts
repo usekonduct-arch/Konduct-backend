@@ -114,6 +114,12 @@ describe("drivers", () => {
     await assertFails(getDoc(doc(as("alice", { role: "rider" }), "vehicles/v1")));
     await assertFails(updateDoc(doc(as("tunde", { role: "driver" }), "vehicles/v1"), { load: { taken: 0 } }));
   });
+
+  test("everyone signed in reads the bus board; nobody writes it", async () => {
+    await assertSucceeds(getDocs(collection(as("alice", { role: "rider" }), "liveBuses")));
+    await assertFails(getDocs(collection(env.unauthenticatedContext().firestore(), "liveBuses")));
+    await assertFails(setDoc(doc(as("tunde", { role: "driver" }), "liveBuses/v1"), { seatsTaken: 0 }));
+  });
 });
 
 describe("support chat", () => {

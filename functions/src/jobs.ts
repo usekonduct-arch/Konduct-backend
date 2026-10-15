@@ -8,6 +8,7 @@ import { db, touched } from "./lib/db";
 import { payoutDriver, reconcilePayouts } from "./domain/payouts";
 import { reconcileTopUps } from "./domain/funding";
 import { reconcile } from "./domain/recon";
+import { rebuildBoard } from "./domain/board";
 
 /** FR-DRV-03: daily automatic payout is the default, after the evening rush. */
 async function dailyPayoutRun() {
@@ -41,4 +42,6 @@ export const JOBS: Record<string, () => Promise<unknown>> = {
   reconcilePayoutsJob: async () => ({ payouts: await reconcilePayouts(), topups: await reconcileTopUps() }),
   reconcileTopUpsJob: reconcileTopUps,
   disputeSlaWatch,
+  /** The riders' bus board, rebuilt from every vehicle (the server also does this when it starts). */
+  rebuildBoard,
 };

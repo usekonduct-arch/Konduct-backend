@@ -123,6 +123,12 @@ service cloud.firestore {
       allow read: if signedIn();
     }
 
+    // The live bus board: a public copy of each active bus (no driver ids or sticker codes) with its
+    // park, trip route and seats paid by scan (domain/board.ts). Written by the server only.
+    match /liveBuses/{vehicleId} {
+      allow read: if signedIn();
+    }
+
     // Places drivers pick a trip route between (domain/landmarks.ts).
     match /landmarks/{landmarkId} {
       allow read: if signedIn();
