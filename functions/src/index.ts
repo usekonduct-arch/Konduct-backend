@@ -8,9 +8,11 @@
  *  Driver    claimDriverAccount (agent's one-time code), (setTransactionPin, changePin, lockMyAccount, registerDevice),
  *            driverConfirmOfflineCode, driverSetPayoutAccount, driverRequestPayout, driverNewTrip, driverSetRoute, payoutBanks
  *  Staff     staff* (MFA + role checked): onboarding, QR, routes, parks, landmarks, trip routes, bus seats, support, people, switches,
- *            approvals, disputes
+ *            approvals, disputes, notifications (staffSendNotice, staffSetBroadcast), ads (staffUpsertAd, staffDeleteAd),
+ *            images (staffUploadMedia)
  *  Bachs     bachsWebhook (HTTP, signature-verified)
- *  Public    receipt (HTTP GET /receipt/<code>: anyone with a receipt's QR can check it is genuine)
+ *  Public    receipt (HTTP GET /receipt/<code>: anyone with a receipt's QR can check it is genuine),
+ *            media (HTTP GET /media/<id>: images for ads and notifications)
  *  Jobs      dailyPayoutRun, reconcileDaily, reconcilePayoutsJob, disputeSlaWatch
  */
 import { onRequest } from "firebase-functions/v2/https";
@@ -28,6 +30,7 @@ import { decide } from "./domain/approvals";
 import { OpenDispute, openDispute, ResolveDispute, resolveDispute, reviewDispute } from "./domain/disputes";
 import { createTopUp, refreshTopUps, TopUpInput } from "./domain/funding";
 import { handleReceiptPage, receiptProof, ReceiptProofInput } from "./domain/receipts";
+import { DeleteAd, deleteAd, handleMediaRequest, joinTopic, SendNotice, sendNotice, SetBroadcast, setBroadcastActive, UploadMedia, uploadMedia, UpsertAd, upsertAd } from "./domain/messaging";
 import { ConfirmInput, confirmOfflineCode, confirmPayment, previewPayment, PreviewInput, undoPayment } from "./domain/pay";
 import { SetParkBuses, setParkBuses, UpsertPark, upsertPark } from "./domain/parks";
 import { DriverSetRoute, setVehicleRoute, StaffSetRoute, UpsertLandmark, upsertLandmark } from "./domain/landmarks";
@@ -87,6 +90,8 @@ const registerDevice_ = callable(
   async (req, data) => {
     const actor = await requireMember(req, ["rider", "driver"]);
     await db.doc(`users/${actor.uid}/devices/${data.deviceId}`).set({ fcmToken: data.fcmToken, platform: data.platform, active: true, lastSeenAtMs: Date.now(), ...stamp() }, { merge: true });
+    // Group messages from the console go to the role's topic.
+    await joinTopic(data.fcmToken, actor.role);
     return { ok: true };
   },
 );
@@ -234,6 +239,19 @@ export const staffReviewDispute = callable(z.strictObject({ disputeId: idField }
   reviewDispute(await requireStaff(req, ["support", "ops", "admin"]), data.disputeId),
 );
 
+/** Messages to one person or a whole group: inbox, popup and/or push. */
+export const staffSendNotice = callable(SendNotice, async (req, data) => sendNotice(await requireStaff(req, ["ops", "admin"]), data));
+
+export const staffSetBroadcast = callable(SetBroadcast, async (req, data) => setBroadcastActive(await requireStaff(req, ["ops", "admin"]), data));
+
+/** Carousel and popup ads in the apps. */
+export const staffUpsertAd = callable(UpsertAd, async (req, data) => upsertAd(await requireStaff(req, ["ops", "admin"]), data));
+
+export const staffDeleteAd = callable(DeleteAd, async (req, data) => deleteAd(await requireStaff(req, ["ops", "admin"]), data));
+
+/** One image for an ad or a notification (the console resizes it first). */
+export const staffUploadMedia = callable(UploadMedia, async (req, data) => uploadMedia(await requireStaff(req, ["ops", "admin"]), data));
+
 export const staffResolveDispute = callable(ResolveDispute, async (req, data) => resolveDispute(await requireStaff(req, ["support", "ops", "admin"]), data));
 
 /* ------------------------------------------------------------------- Bachs */
@@ -245,6 +263,9 @@ export const bachsWebhook = onRequest(
 
 /** The public receipt check the QR on every receipt opens. Read-only; shows no names or balances. */
 export const receipt = onRequest({ region: REGION, memory: "256MiB", timeoutSeconds: 15, maxInstances: 10, cors: false }, handleReceiptPage);
+
+/** Images for ads and notifications. */
+export const media = onRequest({ region: REGION, memory: "256MiB", timeoutSeconds: 15, maxInstances: 10, cors: false }, handleMediaRequest);
 
 /* -------------------------------------------------------------------- jobs */
 

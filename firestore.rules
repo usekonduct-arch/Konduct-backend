@@ -41,6 +41,26 @@ service cloud.firestore {
       }
     }
 
+    // A rider or driver: the role claim the backend sets.
+    function member() {
+      return signedIn() && request.auth.token.role in ['rider', 'driver'];
+    }
+
+    // Staff messages to a whole group. Apps read the live ones for their own group.
+    match /broadcasts/{id} {
+      allow read: if (member() && resource.data.active == true && resource.data.audience in ['all', request.auth.token.role]) || staffReader();
+    }
+
+    // Carousel and popup ads, the same way.
+    match /ads/{id} {
+      allow read: if (member() && resource.data.active == true && resource.data.audience in ['all', request.auth.token.role]) || staffReader();
+    }
+
+    // Ad and notification images are served by the backend (GET /media/<id>), never read here.
+    match /media/{id} {
+      allow read: if false;
+    }
+
     // Balances: your own wallet only.
     match /wallets/{accountId} {
       allow read: if (signedIn() && resource.data.ownerUid == me()) || staffReader();

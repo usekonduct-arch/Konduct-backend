@@ -323,7 +323,7 @@ export async function confirmPayment(actor: Actor, input: z.infer<typeof Confirm
     await db.collection("flags").add({ type: "possible_duplicate", uid: actor.uid, txId: result.txId, vehicleId: q.vehicleId, status: "open", ...stamp() });
   }
   const riders = q.passengers === 1 ? "1 rider" : `${q.passengers} riders`;
-  await notify(q.driverUid, "fare.received", { title: `${naira(q.totalKobo)} received`, body: `${riders} · ${reference}`, data: { txId: result.txId }, channel: "konduct_payments", critical: true });
+  await notify(q.driverUid, "fare.received", { title: `${naira(q.totalKobo)} received`, body: `${riders} · ${reference}`, data: { txId: result.txId, amountKobo: String(q.totalKobo), riders: String(q.passengers) }, critical: true });
   return result;
 }
 

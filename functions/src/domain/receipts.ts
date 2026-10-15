@@ -12,11 +12,11 @@ import type { Request } from "firebase-functions/v2/https";
 import type { Response } from "express";
 import { z } from "zod";
 
-import { REGION } from "../config";
 import { db } from "../lib/db";
 import { fail } from "../lib/errors";
 import { type Actor, rateLimit } from "../lib/guards";
 import { naira } from "../lib/money";
+import { publicBase } from "../lib/public";
 import { driverAccount, riderAccount, verifyEntry } from "../ledger/ledger";
 
 export const ReceiptProofInput = z.strictObject({
@@ -25,13 +25,6 @@ export const ReceiptProofInput = z.strictObject({
 });
 
 const HASH_CHARS = 20;
-
-/** Where the public page lives: RECEIPT_BASE_URL, else Render's own URL, else the Cloud Function. */
-function verifyBase() {
-  const set = process.env.RECEIPT_BASE_URL ?? process.env.RENDER_EXTERNAL_URL;
-  if (set) return set.replace(/\/$/, "");
-  return `https://${REGION}-${process.env.GCLOUD_PROJECT ?? process.env.GCP_PROJECT}.cloudfunctions.net`;
-}
 
 const ledgerTxId = (kind: "fare" | "topup" | "payout", id: string) => (kind === "fare" ? id : `${kind}_${id}`);
 
@@ -51,7 +44,7 @@ export async function receiptProof(actor: Actor, input: z.infer<typeof ReceiptPr
     verified: true,
     posted: true,
     code,
-    verifyUrl: `${verifyBase()}/receipt/${code}`,
+    verifyUrl: `${publicBase()}/receipt/${code}`,
     hash: e.hash as string,
     seq: e.seq as number,
     side: e.side as string,

@@ -120,7 +120,7 @@ export async function settleTopUp(checkoutId: string, reference: string | null) 
     refs: { topupId: reference, checkoutId, chargeId: s.charge?.id ?? null },
     after: (tx) => tx.update(ref, { status: "credited", creditedKobo: paidKobo, chargeId: s.charge?.id ?? null, ...touched() }),
   });
-  await notify(uid, "wallet.funded", { title: `${naira(paidKobo)} added`, body: "Your Konduct wallet is topped up." });
+  await notify(uid, "wallet.funded", { title: `${naira(paidKobo)} added`, body: "Your Konduct wallet is topped up.", data: { amountKobo: String(paidKobo) } });
   return { handled: true as const, why: "credited" };
 }
 
@@ -287,7 +287,7 @@ export async function settleDeposit(eventId: string, d: DepositData) {
       if (linkSender && payerRef) tx.create(payerRef, { uid, firstSeenCharge: chargeId, ...stamp() });
     },
   });
-  await notify(uid, "wallet.funded", { title: `${naira(paidKobo)} added`, body: "Your bank transfer has landed in your Konduct wallet." });
+  await notify(uid, "wallet.funded", { title: `${naira(paidKobo)} added`, body: "Your bank transfer has landed in your Konduct wallet.", data: { amountKobo: String(paidKobo) } });
   return { handled: true, why: `credited by ${matchedBy}` };
 }
 

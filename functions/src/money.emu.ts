@@ -13,8 +13,9 @@ import { driverAccount, PLATFORM, riderAccount, verifyAccount } from "./ledger/l
 import { confirmPayment, previewPayment, undoPayment } from "./domain/pay";
 import { createTopUp, refreshTopUps } from "./domain/funding";
 import { lookUpReceipt, receiptProof } from "./domain/receipts";
+import { deleteAd, sendNotice, uploadMedia, upsertAd } from "./domain/messaging";
 import { handleBachsWebhook } from "./bachs/webhook";
-import { setUserStatus, issueVehicleQr, inviteDriver, resetDriverCode } from "./domain/staff";
+import { setUserStatus, issueVehicleQr, inviteDriver, resetDriverCode, requestAdjustment, requestKycTier } from "./domain/staff";
 import { claimDriverAccount } from "./domain/accounts";
 import { memberToken } from "./lib/guards";
 import { decide } from "./domain/approvals";
@@ -825,3 +826,60 @@ describe("disputes and books", () => {
   });
 });
 
+
+describe("approvals and staff messages", () => {
+  const admin = () => actorFor(uniq("adm"), "admin", { role: "admin", status: "active" });
+
+  test("an admin may approve their own request; ops still need a second person", async () => {
+    const r = await makeRider(0);
+    const a = admin();
+    const own = await requestKycTier(a, r.uid, 2);
+    const done = await decide(a, own.approvalId, "approve");
+    assert.equal(done.status, "approved");
+    assert.equal((await db.doc(`users/${r.uid}`).get()).get("kycTier"), 2);
+    assert.equal((await db.doc(`approvals/${own.approvalId}`).get()).get("selfApproved"), true);
+
+    const ops = actorFor(uniq("ops"), "ops", { role: "ops", status: "active" });
+    const adj = await requestAdjustment(ops, { account: riderAccount(r.uid), side: "credit", amountKobo: 100, memo: "test credit" });
+    assert.equal(await reason(decide(ops, adj.approvalId, "approve")), "same_person");
+  });
+
+  test("a message to one person lands in their inbox; a group message is one broadcast doc", async () => {
+    const r = await makeRider(0);
+    const one = await sendNotice(admin(), { audience: "one", to: r.uid, title: "Hello", body: "Welcome to Konduct", popup: true, push: false, link: "app:topup", linkLabel: "Top up" });
+    assert.equal(one.sentTo, 1);
+    const inbox = await db.collection(`users/${r.uid}/notifications`).get();
+    assert.equal(inbox.size, 1);
+    assert.equal(inbox.docs[0].get("popup"), true);
+    assert.equal(inbox.docs[0].get("link"), "app:topup");
+
+    const group = await sendNotice(admin(), { audience: "rider", title: "Free rides", body: "All day Friday", popup: false, push: false });
+    const b = await db.doc(`broadcasts/${group.id}`).get();
+    assert.equal(b.get("active"), true);
+    assert.equal(b.get("audience"), "rider");
+    assert.equal(await reason(sendNotice(admin(), { audience: "one", to: "nobody@konduct.test", title: "Hi", body: "Hello there", popup: false, push: false })), "no_such_person");
+  });
+
+  test("ads keep their schedule and links; images must really be images", async () => {
+    const ad = await upsertAd(admin(), {
+      placement: "carousel",
+      audience: "all",
+      title: "Ride more",
+      body: "",
+      imageUrl: "https://example.com/a.jpg",
+      link: "https://konduct.app",
+      buttons: [{ label: "Learn more", link: "app:topup" }],
+      active: true,
+      startsAtMs: null,
+      endsAtMs: null,
+      order: 1,
+    });
+    assert.equal((await db.doc(`ads/${ad.id}`).get()).get("buttons")[0].label, "Learn more");
+    await deleteAd(admin(), { id: ad.id });
+    assert.equal((await db.doc(`ads/${ad.id}`).get()).exists, false);
+    assert.equal(await reason(uploadMedia(admin(), { contentType: "image/png", data: Buffer.from("not a png at all").toString("base64") })), "not_an_image");
+    const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
+    const up = await uploadMedia(admin(), { contentType: "image/png", data: png.toString("base64") });
+    assert.match(up.url, /\/media\/[A-Za-z0-9_-]+$/);
+  });
+});

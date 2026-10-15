@@ -1,6 +1,15 @@
 {
   "indexes": [
     {
+      "collectionGroup": "broadcasts",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "active", "order": "ASCENDING" },
+        { "fieldPath": "audience", "order": "ASCENDING" },
+        { "fieldPath": "createdAtMs", "order": "DESCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "supportThreads",
       "queryScope": "COLLECTION",
       "fields": [

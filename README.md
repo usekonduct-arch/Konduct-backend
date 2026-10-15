@@ -142,6 +142,28 @@ and build the apps without `BACKEND_URL`.
 - Staff MFA needs Identity Platform, which may need Blaze for your chosen second factor. Staff calls are
   refused without MFA; don't turn `REQUIRE_STAFF_MFA` off in production.
 
+## Notifications, popups and ads (all on Render)
+
+Sent from the console (Notifications and Ads pages, admin or operations). Nothing here needs Cloud Functions,
+Storage or the Blaze plan:
+
+- **Push** goes through FCM with the Admin SDK. Each phone registers with `registerDevice` and joins its group's
+  topic (`konduct_rider` or `konduct_driver`), so a group message is one send, not one per person.
+- **To one person** (`staffSendNotice`, audience `one`): a doc in `users/{uid}/notifications` plus a push to their phones.
+  **To a group**: one `broadcasts/{id}` doc the apps read directly (no fan-out writes against the Spark quota) plus one topic push.
+  `staffSetBroadcast` takes a group message back out of the inboxes.
+- **Popups**: a message or ad flagged as a popup opens over the app once per phone.
+- **Spoken money alerts**: `fare.received`, `wallet.funded` and `payout.paid` go out on their own Android channels
+  (`konduct_voice_fare`, `konduct_voice_wallet`, `konduct_voice_payout`) whose sound is a recorded voice clip on the alarm
+  stream, so it plays with the phone on silent. With the app open, the app speaks the sentence with the amount instead
+  ("Payment received. 600 naira, from 3 riders"). The apps have no switch to mute them.
+- **Ads** (`staffUpsertAd`, `staffDeleteAd`): `ads/{id}`, carousel banners at 1200 × 600 or popups at 1080 × 1350, with an
+  optional tap link, up to two buttons, a schedule and an on/off switch. With no live ad the apps show nothing.
+- **Images** (`staffUploadMedia`): the console crops each picture to its standard size and keeps it under 700 KB; it is stored
+  in `media/{id}` and served at `GET /media/<id>`. Links are `https://` pages (opened inside the app) or `app:<screen>` shortcuts.
+- After deploying, run `firebase deploy --only firestore:rules,firestore:indexes` for the `broadcasts` and `ads` rules and the
+  `broadcasts` index.
+
 ## How people sign in
 
 - **Riders**: email + password, then name + student ID (`registerRider`). The student ID is unique per campus.

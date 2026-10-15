@@ -8,19 +8,63 @@ import { logger } from "firebase-functions";
 
 import { db, FieldValue, stamp } from "../lib/db";
 
-export type Push = { title: string; body: string; data?: Record<string, string>; channel?: string; critical?: boolean };
+/**
+ * Money alerts are spoken. Each kind has its own Android channel whose sound is a recorded voice
+ * clip in the apps (res/raw/<sound>.wav), played on the alarm stream so it is heard on silent;
+ * with the app open, the app speaks the amount instead (lib/messages/voice.dart).
+ */
+const VOICE: Record<string, { channel: string; sound: string }> = {
+  "fare.received": { channel: "konduct_voice_fare", sound: "voice_fare_received" },
+  "wallet.funded": { channel: "konduct_voice_wallet", sound: "voice_wallet_funded" },
+  "payout.paid": { channel: "konduct_voice_payout", sound: "voice_payout_sent" },
+};
 
-export async function notify(uid: string, kind: string, push: Push) {
+export type Push = {
+  title: string;
+  body: string;
+  data?: Record<string, string>;
+  channel?: string;
+  critical?: boolean;
+  /** Shown in the inbox and, for a push, in the expanded notification. */
+  imageUrl?: string | null;
+  /** https:// page or app:<screen> shortcut the message's button opens. */
+  link?: string | null;
+  linkLabel?: string | null;
+  /** Opens over the app the next time it's in front. */
+  popup?: boolean;
+};
+
+export async function notify(uid: string, kind: string, push: Push, opts: { push?: boolean } = {}) {
   try {
-    await db.collection(`users/${uid}/notifications`).add({ kind, title: push.title, body: push.body, data: push.data ?? {}, read: false, ...stamp() });
+    await db.collection(`users/${uid}/notifications`).add({
+      kind,
+      title: push.title,
+      body: push.body,
+      data: push.data ?? {},
+      imageUrl: push.imageUrl ?? null,
+      link: push.link ?? null,
+      linkLabel: push.linkLabel ?? null,
+      popup: push.popup ?? false,
+      read: false,
+      createdAtMs: Date.now(),
+      ...stamp(),
+    });
+    if (opts.push === false) return;
     const devices = await db.collection(`users/${uid}/devices`).where("active", "==", true).limit(5).get();
     const tokens = devices.docs.map((d) => d.get("fcmToken") as string).filter(Boolean);
     if (!tokens.length) return;
     const res = await getMessaging().sendEachForMulticast({
       tokens,
-      notification: { title: push.title, body: push.body },
-      data: { kind, ...(push.data ?? {}) },
-      android: { priority: "high", notification: { channelId: push.channel ?? "konduct_default", sound: push.critical ? "payment" : "default" } },
+      notification: { title: push.title, body: push.body, ...(push.imageUrl ? { imageUrl: push.imageUrl } : {}) },
+      data: { kind, popup: push.popup ? "1" : "0", ...(push.link ? { link: push.link } : {}), ...(push.data ?? {}) },
+      android: {
+        priority: "high",
+        notification: {
+          channelId: VOICE[kind]?.channel ?? push.channel ?? "konduct_default",
+          sound: VOICE[kind]?.sound ?? "default",
+          ...(push.imageUrl ? { imageUrl: push.imageUrl } : {}),
+        },
+      },
     });
     // Forget tokens the device no longer accepts.
     res.responses.forEach((r, i) => {

@@ -1,7 +1,9 @@
 /**
- * Maker-checker (FR-ADM-03, SEC-PAY-06). Sensitive actions are requested by one person and only
- * executed when a *different* staff member with the right role approves them. Each request and
- * decision is audited with who, when and from where (FR-ADM-05).
+ * Maker-checker (FR-ADM-03, SEC-PAY-06). Sensitive actions are requested by one person and
+ * executed when a staff member with the right role approves them. That must be a *different*
+ * person, except that an admin may approve their own request (the owner's choice for a small
+ * team); such decisions are marked selfApproved. Each request and decision is audited with who,
+ * when and from where (FR-ADM-05).
  */
 import { z } from "zod";
 
@@ -43,10 +45,11 @@ export async function decide(actor: Actor, approvalId: string, decision: "approv
     if (!snap.exists) fail("not-found", "no_approval", "No such request.");
     const kind = snap.get("kind") as ApprovalKind;
     if (snap.get("status") !== "pending") fail("failed-precondition", "decided", "This request was already decided.");
-    if (snap.get("makerUid") === actor.uid) fail("permission-denied", "same_person", "Someone else has to approve your own request.");
+    const own = snap.get("makerUid") === actor.uid;
+    if (own && actor.role !== "admin") fail("permission-denied", "same_person", "Someone else has to approve your own request.");
     if (!CHECKERS[kind].includes(actor.role as StaffRole)) fail("permission-denied", "wrong_role", "Your role can't approve this.");
-    tx.update(ref, { status: decision === "approve" ? "executing" : "rejected", checkerUid: actor.uid, note: note ?? null, decidedAtMs: Date.now(), ...touched() });
-    audit({ actor: actor.uid, action: `approval.${decision}.${kind}`, target: ref.path, ip: actor.ip }, tx);
+    tx.update(ref, { status: decision === "approve" ? "executing" : "rejected", checkerUid: actor.uid, selfApproved: own, note: note ?? null, decidedAtMs: Date.now(), ...touched() });
+    audit({ actor: actor.uid, action: `approval.${decision}.${kind}`, target: ref.path, ip: actor.ip, after: own ? { selfApproved: true } : undefined }, tx);
     return snap.data()!;
   });
   if (decision === "reject") return { status: "rejected" };

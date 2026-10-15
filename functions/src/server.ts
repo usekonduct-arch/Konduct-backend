@@ -7,6 +7,7 @@
  *                          Authorization: Bearer <ID token>, X-Firebase-AppCheck: <App Check token>
  *  POST /bachsWebhook      Bachs webhooks (raw body, signature-verified)
  *  GET  /receipt/<code>    public receipt check (the QR on every app receipt)
+ *  GET  /media/<id>        images for ads and notifications
  *  POST /jobs/<name>       scheduled jobs, called by an external cron with Authorization: Bearer <JOBS_SECRET>
  *  GET  /healthz
  *
@@ -22,6 +23,7 @@ import { type Callable, decodeCallableData } from "./api/callable";
 import { ENFORCE_APP_CHECK } from "./config";
 import { handleBachsWebhook } from "./bachs/webhook";
 import { handleReceiptPage } from "./domain/receipts";
+import { handleMediaRequest } from "./domain/messaging";
 import { safeEqual } from "./lib/crypto";
 import { auth } from "./lib/db";
 import { JOBS } from "./jobs";
@@ -84,6 +86,7 @@ app.use((req, res, next) => {
 });
 
 app.get("/receipt/:code", (req, res) => handleReceiptPage(req as unknown as Request, res));
+app.get("/media/:id", (req, res) => handleMediaRequest(req as unknown as Request, res));
 
 app.post("/bachsWebhook", express.raw({ type: () => true, limit: "256kb", verify: keepRaw }), (req, res) => handleBachsWebhook(req as Request, res));
 
@@ -109,7 +112,12 @@ function sendError(res: Response, e: HttpsError) {
   res.status(e.httpErrorCode.status).json({ error: e.toJSON() });
 }
 
-app.post("/:name", express.json({ limit: "64kb", verify: keepRaw }), async (req, res) => {
+// Callables carry small JSON; only an image upload needs room (the console keeps images under 700 KB).
+const smallJson = express.json({ limit: "64kb", verify: keepRaw });
+const bigJson = express.json({ limit: "1mb", verify: keepRaw });
+const bodyFor = (req: express.Request, res: Response, next: NextFunction) => (req.params.name === "staffUploadMedia" ? bigJson : smallJson)(req, res, next);
+
+app.post("/:name", bodyFor, async (req, res) => {
   const fn = callables.get(String(req.params.name));
   if (!fn) return void res.status(404).json({ error: { status: "NOT_FOUND", message: "Not found" } });
   if (!req.body || typeof req.body !== "object" || !("data" in req.body)) {

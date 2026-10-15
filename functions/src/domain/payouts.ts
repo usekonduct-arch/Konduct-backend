@@ -299,7 +299,7 @@ async function settle(payoutId: string, data: Record<string, unknown>) {
     audit({ actor: "bachs:webhook", action: "payout.paid", target: ref.path, after: { amountKobo } }, tx);
     return { uid: p.get("uid") as string, amountKobo, last4: p.get("accountLast4") as string };
   });
-  if (result) await notify(result.uid, "payout.paid", { title: `${naira(result.amountKobo)} paid out`, body: `Sent to your bank account ****${result.last4}.` });
+  if (result) await notify(result.uid, "payout.paid", { title: `${naira(result.amountKobo)} paid out`, body: `Sent to your bank account ****${result.last4}.`, data: { amountKobo: String(result.amountKobo) } });
 }
 
 /** Moves a transferred amount back from the driver's Bachs account to Konduct's. */
