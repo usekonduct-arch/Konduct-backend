@@ -54,8 +54,6 @@ export const RULES = {
   repeatScanWindowMs: 10 * 60_000,
   /** A preview is honoured this long (SEC-QR-05: one quote, one payment). */
   quoteTtlMs: 2 * 60_000,
-  /** Rider can undo a wrong-vehicle payment this long after paying (SAF-01). */
-  undoWindowMs: 60_000,
   /** Top-up bounds and checkout lifetime. */
   minTopUpKobo: 20_000, // ₦200
   maxTopUpKobo: 5_000_000, // ₦50,000

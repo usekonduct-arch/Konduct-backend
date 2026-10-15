@@ -2,12 +2,12 @@
  * Konduct backend: every endpoint the apps and consoles can reach.
  *
  *  Both      supportOpen, supportSend (chat with staff)
- *  Rider     registerRider (email + password sign-in), setTransactionPin, changePin, payPreview, payConfirm, payUndo, rateDriver,
+ *  Rider     registerRider (email + password sign-in), setTransactionPin, changePin, payPreview, payConfirm, rateDriver,
  *            createTopUp, refreshTopUps, openDispute, lockMyAccount, registerDevice, riderSetPayoutAccount, riderWithdraw, payoutBanks
  *  Both      receiptProof (verify a fare, top-up or payout against the ledger)
  *  Driver    claimDriverAccount (agent's one-time code), (setTransactionPin, changePin, lockMyAccount, registerDevice),
  *            driverConfirmOfflineCode, driverSetPayoutAccount, driverRequestPayout, driverNewTrip, driverSetRoute, payoutBanks
- *  Staff     staff* (MFA + role checked): onboarding, QR, routes, parks, landmarks, trip routes, bus seats, support, people, switches,
+ *  Staff     staff* (MFA + role checked): onboarding, staff accounts (staffAddStaff, staffRevokeStaff, ...), editing people, QR, routes, parks, landmarks, trip routes, bus seats, support, people, switches,
  *            approvals, disputes, notifications (staffSendNotice, staffSetBroadcast), ads (staffUpsertAd, staffDeleteAd),
  *            images (staffUploadMedia)
  *  Bachs     bachsWebhook (HTTP, signature-verified)
@@ -23,6 +23,7 @@ import { BACHS_API_KEY, BACHS_WEBHOOK_SECRETS, IDENTITY_KEY, OFFLINE_CODE_KEY, Q
 import { handleBachsWebhook } from "./bachs/webhook";
 import { callable, Empty } from "./api/callable";
 import { db, stamp } from "./lib/db";
+import { fail } from "./lib/errors";
 import { JOBS } from "./jobs";
 import { memberToken, requireMember, requireStaff } from "./lib/guards";
 import { changePin, claimDriverAccount, RegisterRider, registerRider, setTransactionPin } from "./domain/accounts";
@@ -31,7 +32,7 @@ import { OpenDispute, openDispute, ResolveDispute, resolveDispute, reviewDispute
 import { createTopUp, refreshTopUps, TopUpInput } from "./domain/funding";
 import { handleReceiptPage, receiptProof, ReceiptProofInput } from "./domain/receipts";
 import { DeleteAd, deleteAd, handleMediaRequest, joinTopic, SendNotice, sendNotice, SetBroadcast, setBroadcastActive, UploadMedia, uploadMedia, UpsertAd, upsertAd } from "./domain/messaging";
-import { ConfirmInput, confirmOfflineCode, confirmPayment, previewPayment, PreviewInput, undoPayment } from "./domain/pay";
+import { ConfirmInput, confirmOfflineCode, confirmPayment, previewPayment, PreviewInput } from "./domain/pay";
 import { SetParkBuses, setParkBuses, UpsertPark, upsertPark } from "./domain/parks";
 import { DriverSetRoute, setVehicleRoute, StaffSetRoute, UpsertLandmark, upsertLandmark } from "./domain/landmarks";
 import { RateDriver, rateDriver } from "./domain/ratings";
@@ -54,9 +55,12 @@ import {
   SetSwitches,
   setUserStatus,
   setVehicleStatus,
+  UpdateUser,
+  updateUserDetails,
   UpsertRoute,
   upsertRoute,
 } from "./domain/staff";
+import { AddStaff, addStaff, markPasswordChosen, resetStaffPassword, revokeStaff, SetStaffRole, setStaffRole, StaffUid } from "./domain/team";
 
 const PAY_MIN = Number(process.env.MIN_INSTANCES_PAY ?? 0); // 1 in production: no cold start on the pay path
 
@@ -109,7 +113,14 @@ export const payPreview = callable(PreviewInput, async (req, data) => previewPay
 
 export const payConfirm = callable(ConfirmInput, async (req, data) => confirmPayment(await requireMember(req, ["rider"]), data), { secrets: [OFFLINE_CODE_KEY], minInstances: PAY_MIN });
 
-export const payUndo = callable(z.strictObject({ txId: z.string().max(60) }), async (req, data) => undoPayment(await requireMember(req, ["rider"]), data.txId));
+/**
+ * Riders can no longer undo a payment themselves (it was abused to ride for free). App builds from
+ * before that still have the button; they get this answer. Wrong vehicle: contact support.
+ */
+export const payUndo = callable(z.object({}).passthrough(), async (req) => {
+  await requireMember(req, ["rider"]);
+  fail("failed-precondition", "undo_removed", "Payments can't be undone in the app. If you paid the wrong bus, contact Konduct support from this receipt.");
+});
 
 const createTopUp_ = callable(TopUpInput, async (req, data) => createTopUp(await requireMember(req, ["rider"]), data), { secrets: [BACHS_API_KEY] });
 
@@ -224,6 +235,28 @@ export const staffSetKycTier = callable(z.strictObject({ uid: uidField, tier: z.
 export const staffGrantRole = callable(z.strictObject({ uid: uidField, role: z.enum(["admin", "ops", "agent", "marshal", "support", "auditor", "none"]) }), async (req, data) =>
   requestRoleGrant(await requireStaff(req, ["admin"]), data.uid, data.role),
 );
+
+/** An admin corrects a rider's or driver's name, email, student ID or phone. */
+export const staffUpdateUser = callable(UpdateUser, async (req, data) => updateUserDetails(await requireStaff(req, ["admin"]), data));
+
+/** Staff accounts: the admin adds someone by email and sends them the one-time password returned here. */
+export const staffAddStaff = callable(AddStaff, async (req, data) => addStaff(await requireStaff(req, ["admin"]), data));
+
+export const staffResetStaffPassword = callable(StaffUid, async (req, data) => resetStaffPassword(await requireStaff(req, ["admin"]), data.uid));
+
+export const staffSetStaffRole = callable(SetStaffRole, async (req, data) => setStaffRole(await requireStaff(req, ["admin"]), data.uid, data.role));
+
+export const staffRevokeStaff = callable(StaffUid, async (req, data) => revokeStaff(await requireStaff(req, ["admin"]), data.uid));
+
+/**
+ * First sign-in: the new staff member has replaced the one-time password with their own. It only
+ * clears a flag on the caller's own profile, so it skips the two-step check: a password change can
+ * hand the console a fresh token that no longer carries the second-factor mark.
+ */
+export const staffPasswordChosen = callable(Empty, async (req) => {
+  if (!req.auth || req.auth.token.staff !== true) fail("permission-denied", "wrong_role", "You can't do that from this account.");
+  return markPasswordChosen(req.auth.uid);
+});
 
 export const staffRequestReconRelease = callable(z.strictObject({ note: z.string().min(10).max(300) }), async (req, data) =>
   requestReconRelease(await requireStaff(req, ["admin"]), data.note),

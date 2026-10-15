@@ -61,9 +61,10 @@ service cloud.firestore {
       allow read: if false;
     }
 
-    // Balances: your own wallet only.
+    // Balances: your own wallet only. Decided by the document id, not its contents, so the app's
+    // live balance listener is allowed even before the wallet exists and never gets cut off.
     match /wallets/{accountId} {
-      allow read: if (signedIn() && resource.data.ownerUid == me()) || staffReader();
+      allow read: if (signedIn() && (accountId == 'rider_' + me() || accountId == 'driver_' + me())) || staffReader();
     }
 
     // Rider receipts (they include the offline code, so the payer only).

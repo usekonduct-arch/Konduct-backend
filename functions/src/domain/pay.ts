@@ -7,7 +7,9 @@
  *             credits the driver, writes ledger entries, the transaction, one trip per passenger
  *             and the driver's live alert, and takes the riders' seats on the bus (seats.ts).
  *             Same idempotency key = same result, never a 2nd debit.
- * undo     -> 60s wrong-vehicle undo, by reversing entries (never editing them); frees the seats.
+ *
+ * There is no self-service undo: a rider who paid the wrong vehicle contacts support, and a refund
+ * goes through a dispute (disputes.ts), so nobody can ride and then take the fare back.
  *
  * Amounts from the client are never trusted (SEC-PAY-04): the client sends a quote id.
  */
@@ -20,13 +22,13 @@ import { db, FieldValue, millis, stamp, touched } from "../lib/db";
 import { fail, isHttpsError } from "../lib/errors";
 import { type Actor, rateLimit } from "../lib/guards";
 import { naira } from "../lib/money";
-import { driverAccount, InsufficientFunds, markReversed, prepare, reversalLegs, riderAccount } from "../ledger/ledger";
+import { driverAccount, InsufficientFunds, prepare, riderAccount } from "../ledger/ledger";
 import { checkPin } from "./accounts";
 import { notify } from "./notify";
 import { assertOpen, dailyRef, getSwitches, limitsFor, readDaily } from "./policy";
 import { readVehicleToken } from "./qr";
 import type { CurrentRoute } from "./landmarks";
-import { alighted, assertSeats, boarded, countsSeats, fleetRef, liveLoad, type Load, readFleet } from "./seats";
+import { assertSeats, boarded, countsSeats, fleetRef, liveLoad, type Load, readFleet } from "./seats";
 
 const firstName = (full: unknown) => String(full ?? "").trim().split(/\s+/)[0] || "Driver";
 
@@ -153,6 +155,10 @@ export const ConfirmInput = z.strictObject({
   repeatConfirmed: z.boolean().default(false),
 });
 
+/**
+ * undoUntilMs is always the payment time: app builds from before undo was removed read it and
+ * show their undo button only while it is in the future, so they never show it.
+ */
 type PayResult = { txId: string; reference: string; totalKobo: number; passengers: number; balanceKobo: number; offlineCode: string; undoUntilMs: number; rideTokens: string[] };
 
 export async function confirmPayment(actor: Actor, input: z.infer<typeof ConfirmInput>): Promise<PayResult> {
@@ -252,7 +258,7 @@ export async function confirmPayment(actor: Actor, input: z.infer<typeof Confirm
         passengers: q.passengers,
         balanceKobo: ledger.balance(riderAccount(actor.uid)),
         offlineCode,
-        undoUntilMs: now + RULES.undoWindowMs,
+        undoUntilMs: now,
         rideTokens,
       };
       tx.create(db.doc(`transactions/${txId}`), {
@@ -271,9 +277,8 @@ export async function confirmPayment(actor: Actor, input: z.infer<typeof Confirm
         totalKobo: q.totalKobo,
         offlineCode,
         driverConfirmedAt: null,
-        undoUntilMs: r.undoUntilMs,
         quoteId: input.quoteId,
-        tripStartedAtMs: load?.tripStartedAtMs ?? null, // which bus trip these seats belong to (undo gives them back)
+        tripStartedAtMs: load?.tripStartedAtMs ?? null, // which bus trip these seats belong to
         tripRoute,
         driverFirstName: firstName(driver.get("fullName")),
         // The rider can rate the driver once the trip should be over (ratings.ts).
@@ -325,42 +330,6 @@ export async function confirmPayment(actor: Actor, input: z.infer<typeof Confirm
   const riders = q.passengers === 1 ? "1 rider" : `${q.passengers} riders`;
   await notify(q.driverUid, "fare.received", { title: `${naira(q.totalKobo)} received`, body: `${riders} · ${reference}`, data: { txId: result.txId, amountKobo: String(q.totalKobo), riders: String(q.passengers) }, critical: true });
   return result;
-}
-
-/** SAF-01: undo within 60 seconds of a wrong-vehicle payment, by reversal. */
-export async function undoPayment(actor: Actor, txId: string) {
-  if (!/^fare_[A-Za-z0-9_-]{8,40}$/.test(txId)) fail("invalid-argument", "bad_tx", "We couldn't find that payment.");
-  await rateLimit(actor.uid, "undo", 5, 60_000);
-  const txRef = db.doc(`transactions/${txId}`);
-  const reversalId = `undo_${txId}`;
-  try {
-    return await db.runTransaction(async (tx) => {
-      const t = await tx.get(txRef);
-      if (!t.exists || t.get("payerUid") !== actor.uid) fail("not-found", "bad_tx", "We couldn't find that payment.");
-      if (t.get("status") !== "completed") fail("failed-precondition", "not_undoable", "This payment can't be undone.");
-      if (Date.now() > t.get("undoUntilMs")) fail("failed-precondition", "undo_expired", "It's too late to undo. Open a dispute from the receipt instead.");
-      if (t.get("driverConfirmedAt")) fail("failed-precondition", "not_undoable", "The driver already confirmed this payment. Open a dispute instead.");
-      const { legs } = await reversalLegs(tx, txId);
-      const daily = await tx.get(dailyRef(actor.uid));
-      const trips = await tx.get(db.collection("trips").where("txId", "==", txId));
-      const vehicle = await tx.get(db.doc(`vehicles/${t.get("vehicleId")}`));
-      const ledger = await prepare(tx, { txId: reversalId, type: "fare.undo", legs, reversalOf: txId });
-      ledger.commit();
-      markReversed(tx, txId, reversalId);
-      tx.update(txRef, { status: "reversed", reversedAtMs: Date.now(), reversal: "undo", ...touched() });
-      trips.docs.forEach((d) => tx.update(d.ref, { status: "void", ...touched() }));
-      tx.update(db.doc(`driverFeed/${t.get("driverUid")}/items/${txId}`), { status: "undone", ...touched() });
-      if (daily.exists) tx.update(daily.ref, { spendKobo: FieldValue.increment(-t.get("totalKobo")), ...touched() });
-      // The rider is off the bus: give the seats back if that trip is still going.
-      const load = alighted(liveLoad(vehicle.data()), t.get("passengers"), t.get("tripStartedAtMs"));
-      if (load) tx.update(vehicle.ref, { load });
-      audit({ actor: actor.uid, action: "pay.undo", target: txRef.path, ip: actor.ip }, tx);
-      return { ok: true, balanceKobo: ledger.balance(riderAccount(actor.uid)) };
-    });
-  } catch (e) {
-    if (e instanceof InsufficientFunds) fail("failed-precondition", "not_undoable", "This payment can't be undone now. Open a dispute from the receipt.");
-    throw e;
-  }
 }
 
 /**

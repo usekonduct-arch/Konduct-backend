@@ -4,13 +4,13 @@
  */
 import { z } from "zod";
 
-import { IDENTITY_KEY, QR_SIGNING_KEY } from "../config";
+import { CAMPUS_ID, IDENTITY_KEY, QR_SIGNING_KEY } from "../config";
 import { audit } from "../lib/audit";
 import { randomCode } from "../lib/crypto";
 import { auth, db, stamp, touched } from "../lib/db";
 import { fail } from "../lib/errors";
 import type { Actor } from "../lib/guards";
-import { cleanName, codeHash, emailKey, maskEmail, normalizeEmail } from "../identity";
+import { cleanName, codeHash, emailKey, maskEmail, normalizeEmail, normalizeStudentId, studentIdKey } from "../identity";
 import { mergeClaims } from "./accounts";
 import { requestApproval } from "./approvals";
 import { makeVehicleToken } from "./qr";
@@ -168,6 +168,60 @@ export async function setUserStatus(actor: Actor, uid: string, status: "active" 
   await mergeClaims(uid, { status });
   if (status === "suspended") await auth.revokeRefreshTokens(uid);
   return { status };
+}
+
+export const UpdateUser = z.strictObject({
+  uid: z.string().regex(/^[A-Za-z0-9]{10,128}$/),
+  fullName: z.string().max(80).transform(cleanName).pipe(z.string().regex(/^[\p{L}'.-]+(\s[\p{L}'.-]+)+$/u, "Enter a first and last name.")).optional(),
+  email: z.string().max(120).transform(normalizeEmail).pipe(z.string().regex(/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/, "Enter a valid email.")).optional(),
+  studentId: z.string().max(40).transform(normalizeStudentId).pipe(z.string().regex(/^[A-Z0-9-]{4,24}$/, "Student IDs use letters, numbers and dashes.")).optional(),
+  contactPhone: e164.nullable().optional(),
+});
+
+/**
+ * An admin corrects a rider's or driver's details. The sign-in email changes too (the person
+ * signs in with the new one from now on), a student ID keeps its one-account claim, and the name
+ * on the app updates at their next sign-in.
+ */
+export async function updateUserDetails(actor: Actor, input: z.infer<typeof UpdateUser>) {
+  const { uid, ...patch } = input;
+  const ref = db.doc(`users/${uid}`);
+  const u = await ref.get();
+  if (!u.exists) fail("not-found", "no_user", "Unknown person.");
+  const role = u.get("role") as string;
+  if (role !== "rider" && role !== "driver") fail("failed-precondition", "not_member", "Staff details are managed on the Staff page.");
+  if (patch.studentId !== undefined && role !== "rider") fail("invalid-argument", "not_rider", "Only students have a student ID.");
+
+  const changes: Record<string, unknown> = {};
+  const before: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(patch)) {
+    if (v !== undefined && v !== (u.get(k) ?? null)) {
+      changes[k] = v;
+      before[k] = u.get(k) ?? null;
+    }
+  }
+  if (!Object.keys(changes).length) return { changed: [] };
+
+  if (typeof changes.email === "string") {
+    const taken = await auth.getUserByEmail(changes.email).catch(() => null);
+    if (taken && taken.uid !== uid) fail("already-exists", "email_taken", "Another account already uses that email.");
+    await auth.updateUser(uid, { email: changes.email });
+    changes.emailMasked = maskEmail(changes.email);
+  }
+
+  await db.runTransaction(async (tx) => {
+    if (typeof changes.studentId === "string") {
+      const newRef = db.doc(`studentIds/${studentIdKey(CAMPUS_ID, changes.studentId)}`);
+      const held = await tx.get(newRef);
+      if (held.exists && held.get("uid") !== uid) fail("already-exists", "student_id_taken", "That student ID is already on another account.");
+      if (before.studentId) tx.delete(db.doc(`studentIds/${studentIdKey(CAMPUS_ID, String(before.studentId))}`));
+      tx.set(newRef, { uid, studentId: changes.studentId, ...stamp() });
+    }
+    tx.update(ref, { ...changes, ...touched() });
+    audit({ actor: actor.uid, action: "user.edit", target: ref.path, before, after: changes, ip: actor.ip }, tx);
+  });
+  if (typeof changes.fullName === "string") await mergeClaims(uid, { name: changes.fullName });
+  return { changed: Object.keys(changes).filter((k) => k !== "emailMasked") };
 }
 
 /** SAF-03: a rider or driver can lock their own wallet instantly; an agent unlocks it. */

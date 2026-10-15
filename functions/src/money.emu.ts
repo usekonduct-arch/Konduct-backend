@@ -7,15 +7,18 @@ import { actorFor, balance, bachsCalls, keyOf, makeDriverWithVehicle, makeRider,
 import { beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
 
+import { CAMPUS_ID } from "./config";
+import { studentIdKey } from "./identity";
 import { auth, db, stamp } from "./lib/db";
 import { isHttpsError } from "./lib/errors";
 import { driverAccount, PLATFORM, riderAccount, verifyAccount } from "./ledger/ledger";
-import { confirmPayment, previewPayment, undoPayment } from "./domain/pay";
+import { confirmPayment, previewPayment } from "./domain/pay";
 import { createTopUp, reconcileTopUps, refreshTopUps } from "./domain/funding";
 import { lookUpReceipt, receiptProof } from "./domain/receipts";
 import { deleteAd, sendNotice, uploadMedia, upsertAd } from "./domain/messaging";
 import { handleBachsWebhook } from "./bachs/webhook";
-import { setUserStatus, issueVehicleQr, inviteDriver, resetDriverCode, requestAdjustment, requestKycTier } from "./domain/staff";
+import { setUserStatus, issueVehicleQr, inviteDriver, resetDriverCode, requestAdjustment, requestKycTier, UpdateUser, updateUserDetails } from "./domain/staff";
+import { addStaff, markPasswordChosen, resetStaffPassword, revokeStaff, setStaffRole } from "./domain/team";
 import { claimDriverAccount } from "./domain/accounts";
 import { memberToken } from "./lib/guards";
 import { decide } from "./domain/approvals";
@@ -202,17 +205,15 @@ describe("scan to pay", () => {
     assert.equal(await reason(confirmPayment(r.actor, { quoteId: q.quoteId, idempotencyKey: keyOf(), repeatConfirmed: true, pin: "2580" })), "over_daily_limit");
   });
 
-  test("undo works once, inside 60 seconds, by reversal", async () => {
+  test("a fare can't be undone by the rider: old apps get an undo time that has already passed", async () => {
     const d = await makeDriverWithVehicle(20_000);
     const r = await makeRider(100_000);
+    const before = Date.now();
     const out = await pay(r, d.token);
-    const u = await undoPayment(r.actor, out.txId);
-    assert.equal(u.balanceKobo, 100_000);
-    assert.equal(await balance(driverAccount(d.uid)), 0);
-    assert.equal(await reason(undoPayment(r.actor, out.txId)), "not_undoable");
-    const other = await makeRider(0);
-    assert.equal(await reason(undoPayment(other.actor, out.txId)), "bad_tx");
-    assert.equal((await db.doc(`ledgerTx/${out.txId}`).get()).get("reversedBy"), `undo_${out.txId}`);
+    assert.ok(out.undoUntilMs <= Date.now() && out.undoUntilMs >= before);
+    assert.equal((await db.doc(`transactions/${out.txId}`).get()).get("undoUntilMs"), undefined);
+    assert.equal(await balance(riderAccount(r.uid)), 80_000);
+    assert.equal(await balance(driverAccount(d.uid)), 20_000);
   });
 });
 
@@ -253,15 +254,13 @@ describe("bus seats by scan", () => {
     assert.equal(await balance(driverAccount(d.uid)), 30_000);
   });
 
-  test("undo gives the seats back; the driver's New trip clears the bus", async () => {
+  test("the driver's New trip clears the bus", async () => {
     const d = await makeDriverWithVehicle(5_000);
     const a = await makeRider(100_000);
     const b = await makeRider(100_000);
-    const out = await pay(a, d.token, { passengers: 4 });
+    await pay(a, d.token, { passengers: 4 });
     await pay(b, d.token, { passengers: 3 });
     assert.equal(await seatsOf(d.vehicleId), 7);
-    await undoPayment(a.actor, out.txId);
-    assert.equal(await seatsOf(d.vehicleId), 3);
     await startNewTrip(d.actor);
     assert.equal(await seatsOf(d.vehicleId), 0);
     const q = await previewPayment(a.actor, { qr: d.token, passengers: 6 });
@@ -385,10 +384,9 @@ describe("trip routes and ratings", () => {
     assert.equal(driver.get("ratingCount"), 1);
     assert.equal((await db.doc(`ratings/${out.txId}`).get()).get("comment"), "Smooth ride");
 
-    // An undone payment can't be rated.
+    // A refunded payment can't be rated.
     const undone = await pay(r, d.token);
-    await undoPayment(r.actor, undone.txId);
-    await db.doc(`transactions/${undone.txId}`).update({ rateFromMs: Date.now() - 1 });
+    await db.doc(`transactions/${undone.txId}`).update({ status: "refunded", rateFromMs: Date.now() - 1 });
     assert.equal(await reason(rateDriver(r.actor, { txId: undone.txId, stars: 5, comment: "" })), "not_rateable");
   });
 });
@@ -911,5 +909,71 @@ describe("approvals and staff messages", () => {
     const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
     const up = await uploadMedia(admin(), { contentType: "image/png", data: png.toString("base64") });
     assert.match(up.url, /\/media\/[A-Za-z0-9_-]+$/);
+  });
+});
+
+describe("people and staff accounts (admin)", () => {
+  const admin = () => actorFor(uniq("adm"), "admin", { role: "admin", status: "active" });
+
+  test("an admin adds staff by email: verified account, role, one-time password; revoking shuts them out", async () => {
+    const a = admin();
+    const email = `${uniq("new").toLowerCase()}@konduct.test`;
+    const added = await addStaff(a, { email, role: "support" });
+    assert.match(added.password, /^[A-Za-z2-9]{14}$/);
+    const user = await auth.getUser(added.uid);
+    assert.equal(user.emailVerified, true);
+    assert.equal(user.customClaims?.role, "support");
+    assert.equal(user.customClaims?.staff, true);
+    const profile = await db.doc(`users/${added.uid}`).get();
+    assert.equal(profile.get("role"), "support");
+    assert.equal(profile.get("mustChangePassword"), true);
+
+    await markPasswordChosen(added.uid);
+    assert.equal((await db.doc(`users/${added.uid}`).get()).get("mustChangePassword"), false);
+
+    await setStaffRole(a, added.uid, "ops");
+    assert.equal((await auth.getUser(added.uid)).customClaims?.role, "ops");
+    const reset = await resetStaffPassword(a, added.uid);
+    assert.notEqual(reset.password, added.password);
+    assert.equal((await db.doc(`users/${added.uid}`).get()).get("mustChangePassword"), true);
+
+    await revokeStaff(a, added.uid);
+    const gone = await auth.getUser(added.uid);
+    assert.equal(gone.disabled, true);
+    assert.equal(gone.customClaims?.staff, false);
+    assert.equal((await db.doc(`users/${added.uid}`).get()).get("role"), "none");
+    assert.equal(await reason(setStaffRole(a, added.uid, "admin")), "not_staff");
+
+    // Adding the same email again brings them back with a new password.
+    const back = await addStaff(a, { email, role: "agent" });
+    assert.equal(back.uid, added.uid);
+    assert.equal((await auth.getUser(added.uid)).disabled, false);
+    assert.equal(await reason(revokeStaff(actorFor(added.uid, "admin", {}), added.uid)), "self");
+  });
+
+  test("a student or driver email can't be made staff", async () => {
+    const r = await makeRider(0);
+    await db.doc(`users/${r.uid}`).update({ email: r.email });
+    assert.equal(await reason(addStaff(admin(), { email: r.email, role: "support" })), "member_email");
+  });
+
+  test("an admin edits a rider's details; the student ID claim moves and clashes are refused", async () => {
+    const studentId = `T-${uniq("s").toUpperCase()}`;
+    const r = await makeRider(0, { studentId });
+    const other = await makeRider(0);
+    await db.doc(`studentIds/${studentIdKey(CAMPUS_ID, studentId)}`).set({ uid: r.uid, studentId });
+    const nextId = `T-${uniq("n").toUpperCase()}`;
+    const newEmail = `${uniq("mail").toLowerCase()}@konduct.test`;
+    const out = await updateUserDetails(admin(), UpdateUser.parse({ uid: r.uid, fullName: "Ada  Obi", studentId: nextId, email: newEmail }));
+    assert.deepEqual(out.changed.sort(), ["email", "fullName", "studentId"]);
+    const u = await db.doc(`users/${r.uid}`).get();
+    assert.equal(u.get("fullName"), "Ada Obi");
+    assert.equal(u.get("studentId"), nextId);
+    assert.equal((await auth.getUser(r.uid)).email, newEmail);
+    assert.equal((await auth.getUser(r.uid)).customClaims?.name, "Ada Obi");
+    const keys = (await db.collection("studentIds").where("uid", "==", r.uid).get()).docs.map((d) => d.get("studentId"));
+    assert.deepEqual(keys, [nextId]);
+    assert.equal(await reason(updateUserDetails(admin(), { uid: other.uid, studentId: nextId })), "student_id_taken");
+    assert.equal(await reason(updateUserDetails(admin(), { uid: other.uid, email: newEmail })), "email_taken");
   });
 });

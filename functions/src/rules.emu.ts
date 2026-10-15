@@ -57,6 +57,11 @@ describe("riders", () => {
     await assertSucceeds(getDocs(query(collection(db, "transactions"), where("payerUid", "==", "alice"))));
   });
 
+  test("a new rider can listen to their own wallet before it exists (the balance listener never dies)", async () => {
+    await assertSucceeds(getDoc(doc(as("newbie", { role: "rider" }), "wallets/rider_newbie")));
+    await assertFails(getDoc(doc(as("newbie", { role: "rider" }), "wallets/rider_alice")));
+  });
+
   test("cannot read anyone else's wallet, receipt or profile by changing an id (BOLA)", async () => {
     const db = as("bob", { role: "rider" });
     await assertFails(getDoc(doc(db, "wallets/rider_alice")));
