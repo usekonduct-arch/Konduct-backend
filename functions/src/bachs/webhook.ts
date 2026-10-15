@@ -118,7 +118,7 @@ async function route(e: Event, fromConnected: boolean): Promise<string> {
       return (await settleDeposit(e.id, d as Parameters<typeof settleDeposit>[1])).why;
     }
     case "checkout.completed":
-      if (fromConnected || d.payment_status !== "paid") return "ignored";
+      if (fromConnected || !["paid", "succeeded"].includes(String(d.payment_status ?? "").toLowerCase())) return "ignored";
       return (await settleTopUp(String(d.checkout_id), d.reference ?? null, d.metadata?.topupId ?? null)).why;
     case "checkout.expired":
       await expireTopUp(d.reference ?? d.metadata?.topupId ?? null, d.checkout_id ? String(d.checkout_id) : null);

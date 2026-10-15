@@ -78,6 +78,9 @@ export async function createTopUp(actor: Actor, input: z.infer<typeof TopUpInput
   return { topupId, checkoutUrl: session.checkout_url, status: "open" };
 }
 
+/** payment_status values that mean the money was collected. */
+const PAID = new Set(["paid", "succeeded"]);
+
 /**
  * Finds the top-up a Bachs payment belongs to. Bachs sends our reference only "when available",
  * so fall back to the metadata we attached, then to the checkout id we stored when we opened it.
@@ -117,7 +120,8 @@ export async function settleTopUp(checkoutId: string, reference: string | null, 
   const s = await getCheckout(checkoutId);
   const status = String(s.status ?? "").toLowerCase();
   const paymentStatus = String(s.payment_status ?? "").toLowerCase();
-  if (!(status === "completed" && paymentStatus === "paid")) {
+  // Bachs's docs say payment_status "paid"; its sandbox answers "succeeded" for the same thing.
+  if (!(status === "completed" && PAID.has(paymentStatus))) {
     const why = `checkout ${status || "?"}/${paymentStatus || "?"}`;
     await note(why);
     return { handled: false as const, why };

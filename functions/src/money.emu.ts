@@ -517,6 +517,14 @@ describe("funding via Bachs", () => {
     assert.equal((await db.doc(`topups/${t.topupId}`).get()).get("lastCheck").why, "credited");
   });
 
+  test("a checkout Bachs reports as completed/succeeded counts as paid", async () => {
+    const r = await makeRider(0);
+    const t = await openTopUp(r);
+    onBachs("GET", "/v1/checkout-sessions/", () => ({ json: { ...paidCheckout(t.topupId), payment_status: "succeeded" } }));
+    assert.deepEqual(await refreshTopUps(r.actor), { checked: 1, credited: 1 });
+    assert.equal(await balance(riderAccount(r.uid)), 200_000);
+  });
+
   test("the 15-minute job credits a paid top-up whose webhook never came", async () => {
     const r = await makeRider(0);
     const t = await openTopUp(r);

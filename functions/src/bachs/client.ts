@@ -75,7 +75,7 @@ export type CheckoutSession = {
   checkout_id: string;
   checkout_url?: string;
   status: string; // open | completed | expired
-  payment_status?: string; // paid | unpaid | no_payment_required
+  payment_status?: string; // paid (docs) or succeeded (sandbox) | unpaid | no_payment_required
   amount?: string;
   currency?: string;
   reference?: string | null;
