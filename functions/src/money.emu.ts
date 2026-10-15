@@ -11,7 +11,8 @@ import { auth, db, stamp } from "./lib/db";
 import { isHttpsError } from "./lib/errors";
 import { driverAccount, PLATFORM, riderAccount, verifyAccount } from "./ledger/ledger";
 import { confirmPayment, previewPayment, undoPayment } from "./domain/pay";
-import { createTopUp } from "./domain/funding";
+import { createTopUp, refreshTopUps } from "./domain/funding";
+import { lookUpReceipt, receiptProof } from "./domain/receipts";
 import { handleBachsWebhook } from "./bachs/webhook";
 import { setUserStatus, issueVehicleQr, inviteDriver, resetDriverCode } from "./domain/staff";
 import { claimDriverAccount } from "./domain/accounts";
@@ -473,6 +474,43 @@ describe("funding via Bachs", () => {
     assert.equal(other.res.code, 200);
     assert.equal(await balance(riderAccount(r.uid)), 200_000);
     assert.equal((await verifyAccount(riderAccount(r.uid))).ok, true);
+  });
+
+  test("a missed webhook is recovered by refreshTopUps, and the receipt verifies against the ledger", async () => {
+    const r = await makeRider(0);
+    const t = await openTopUp(r);
+    // No webhook ever arrives; the rider pulls to refresh.
+    onBachs("GET", "/v1/checkout-sessions/", () => ({ json: paidCheckout(t.topupId) }));
+    assert.deepEqual(await refreshTopUps(r.actor), { checked: 1, credited: 1 });
+    assert.equal(await balance(riderAccount(r.uid)), 200_000);
+    assert.deepEqual(await refreshTopUps(r.actor), { checked: 0, credited: 0 });
+    // A late webhook afterwards changes nothing.
+    const late = webhook(event(evtId(), t.topupId));
+    await handleBachsWebhook(late.req, late.res);
+    assert.equal(await balance(riderAccount(r.uid)), 200_000);
+
+    const proof = await receiptProof(r.actor, { kind: "topup", id: t.topupId });
+    assert.equal(proof.verified, true);
+    assert.equal(proof.amountKobo, 200_000);
+    assert.equal(proof.balanceAfterKobo, 200_000);
+    const page = await lookUpReceipt(proof.code!);
+    assert.equal(page?.genuine, true);
+    assert.equal(page?.amountKobo, 200_000);
+    assert.equal(page?.type, "Wallet top-up");
+    // A guessed or altered code finds nothing; another rider can't get proof of this top-up.
+    const flipped = proof.code!.slice(0, -1) + (proof.code!.endsWith("0") ? "1" : "0");
+    assert.equal(await lookUpReceipt(flipped), null);
+    const other = await makeRider(0);
+    assert.equal((await receiptProof(other.actor, { kind: "topup", id: t.topupId })).posted, false);
+  });
+
+  test("refreshTopUps marks a checkout Bachs has expired, and credits nothing", async () => {
+    const r = await makeRider(0);
+    const t = await openTopUp(r);
+    onBachs("GET", "/v1/checkout-sessions/", () => ({ json: { checkout_id: "chk_test123", status: "expired", payment_status: "unpaid", reference: t.topupId } }));
+    assert.deepEqual(await refreshTopUps(r.actor), { checked: 1, credited: 0 });
+    assert.equal((await db.doc(`topups/${t.topupId}`).get()).get("status"), "expired");
+    assert.equal(await balance(riderAccount(r.uid)), 0);
   });
 
   test("forged, tampered and stale webhooks are refused with 400 and credit nothing", async () => {

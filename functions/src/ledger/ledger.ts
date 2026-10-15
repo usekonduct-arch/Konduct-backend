@@ -229,3 +229,26 @@ export async function verifyAccount(accountId: string): Promise<{ ok: boolean; p
   if (prev !== acct.get("lastHash")) return { ok: false, problem: "head hash differs", entries: seq };
   return { ok: true, entries: seq };
 }
+
+/**
+ * Checks one entry without walking its whole account: its hash must recompute from its own
+ * fields, the next entry (or the account head) must point back at it, and its transaction
+ * header must exist and balance. Enough to vouch for a single receipt.
+ */
+export async function verifyEntry(e: FirebaseFirestore.DocumentData): Promise<{ ok: boolean; problem?: string }> {
+  const { txId, account, side, amountKobo, balanceAfterKobo, seq, type, at } = e;
+  if (entryHash(e.prevHash, { txId, account, side, amountKobo, balanceAfterKobo, seq, type, at }) !== e.hash) return { ok: false, problem: "entry hash does not recompute" };
+  const [next, acct, head] = await Promise.all([
+    db.doc(`ledgerEntries/${account}__${String(seq + 1).padStart(10, "0")}`).get(),
+    db.doc(`wallets/${account}`).get(),
+    db.doc(`ledgerTx/${txId}`).get(),
+  ]);
+  const linked = next.exists ? next.get("prevHash") === e.hash : acct.get("lastHash") === e.hash;
+  if (!linked) return { ok: false, problem: "entry is not in the account's chain" };
+  if (!head.exists) return { ok: false, problem: "missing transaction header" };
+  const legs = head.get("legs") as Leg[];
+  const sum = (s: Side) => legs.filter((l) => l.side === s).reduce((t, l) => t + l.amountKobo, 0);
+  if (sum("debit") !== sum("credit")) return { ok: false, problem: "transaction does not balance" };
+  if (!legs.some((l) => l.account === account && l.side === side && l.amountKobo === amountKobo)) return { ok: false, problem: "entry is not a leg of its transaction" };
+  return { ok: true };
+}

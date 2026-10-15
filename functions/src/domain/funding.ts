@@ -124,6 +124,29 @@ export async function settleTopUp(checkoutId: string, reference: string | null) 
   return { handled: true as const, why: "credited" };
 }
 
+/**
+ * Pull-to-refresh in the rider app. A webhook can arrive late or not at all, so the rider may ask
+ * us to re-read their recent open checkouts from Bachs. Same path as the webhook (settleTopUp
+ * trusts only the API and credits once), so asking twice, or racing the webhook, is harmless.
+ */
+export async function refreshTopUps(actor: Actor) {
+  await rateLimit(actor.uid, "topup_refresh", 10, 60_000);
+  const open = await db.collection("topups").where("uid", "==", actor.uid).where("status", "==", "open").limit(5).get();
+  let credited = 0;
+  for (const d of open.docs) {
+    const checkoutId = d.get("checkoutId") as string | null;
+    if (!checkoutId) continue;
+    try {
+      const r = await settleTopUp(checkoutId, d.id);
+      if (r.why === "credited") credited += 1;
+      else if (r.why.startsWith("checkout expired")) await expireTopUp(d.id);
+    } catch {
+      // Bachs unreachable: the webhook (or the next refresh) will settle it.
+    }
+  }
+  return { checked: open.size, credited };
+}
+
 export async function expireTopUp(reference: string | null) {
   if (!reference?.startsWith("tu_")) return;
   const ref = db.doc(`topups/${reference}`);

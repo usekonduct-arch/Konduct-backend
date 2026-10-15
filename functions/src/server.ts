@@ -6,6 +6,7 @@
  *  POST /<callable name>   Firebase callable protocol: the apps use httpsCallableFromURL(BASE_URL/<name>)
  *                          Authorization: Bearer <ID token>, X-Firebase-AppCheck: <App Check token>
  *  POST /bachsWebhook      Bachs webhooks (raw body, signature-verified)
+ *  GET  /receipt/<code>    public receipt check (the QR on every app receipt)
  *  POST /jobs/<name>       scheduled jobs, called by an external cron with Authorization: Bearer <JOBS_SECRET>
  *  GET  /healthz
  *
@@ -20,6 +21,7 @@ import { getAppCheck } from "firebase-admin/app-check";
 import { type Callable, decodeCallableData } from "./api/callable";
 import { ENFORCE_APP_CHECK } from "./config";
 import { handleBachsWebhook } from "./bachs/webhook";
+import { handleReceiptPage } from "./domain/receipts";
 import { safeEqual } from "./lib/crypto";
 import { auth } from "./lib/db";
 import { JOBS } from "./jobs";
@@ -80,6 +82,8 @@ app.use((req, res, next) => {
   if (req.method === "OPTIONS") return void res.status(origin && consoleOrigins.has(origin) ? 204 : 403).end();
   next();
 });
+
+app.get("/receipt/:code", (req, res) => handleReceiptPage(req as unknown as Request, res));
 
 app.post("/bachsWebhook", express.raw({ type: () => true, limit: "256kb", verify: keepRaw }), (req, res) => handleBachsWebhook(req as Request, res));
 

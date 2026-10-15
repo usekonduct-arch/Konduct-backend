@@ -3,12 +3,14 @@
  *
  *  Both      supportOpen, supportSend (chat with staff)
  *  Rider     registerRider (email + password sign-in), setTransactionPin, changePin, payPreview, payConfirm, payUndo, rateDriver,
- *            createTopUp, openDispute, lockMyAccount, registerDevice, riderSetPayoutAccount, riderWithdraw, payoutBanks
+ *            createTopUp, refreshTopUps, openDispute, lockMyAccount, registerDevice, riderSetPayoutAccount, riderWithdraw, payoutBanks
+ *  Both      receiptProof (verify a fare, top-up or payout against the ledger)
  *  Driver    claimDriverAccount (agent's one-time code), (setTransactionPin, changePin, lockMyAccount, registerDevice),
  *            driverConfirmOfflineCode, driverSetPayoutAccount, driverRequestPayout, driverNewTrip, driverSetRoute, payoutBanks
  *  Staff     staff* (MFA + role checked): onboarding, QR, routes, parks, landmarks, trip routes, bus seats, support, people, switches,
  *            approvals, disputes
  *  Bachs     bachsWebhook (HTTP, signature-verified)
+ *  Public    receipt (HTTP GET /receipt/<code>: anyone with a receipt's QR can check it is genuine)
  *  Jobs      dailyPayoutRun, reconcileDaily, reconcilePayoutsJob, disputeSlaWatch
  */
 import { onRequest } from "firebase-functions/v2/https";
@@ -24,7 +26,8 @@ import { memberToken, requireMember, requireStaff } from "./lib/guards";
 import { changePin, claimDriverAccount, RegisterRider, registerRider, setTransactionPin } from "./domain/accounts";
 import { decide } from "./domain/approvals";
 import { OpenDispute, openDispute, ResolveDispute, resolveDispute, reviewDispute } from "./domain/disputes";
-import { createTopUp, TopUpInput } from "./domain/funding";
+import { createTopUp, refreshTopUps, TopUpInput } from "./domain/funding";
+import { handleReceiptPage, receiptProof, ReceiptProofInput } from "./domain/receipts";
 import { ConfirmInput, confirmOfflineCode, confirmPayment, previewPayment, PreviewInput, undoPayment } from "./domain/pay";
 import { SetParkBuses, setParkBuses, UpsertPark, upsertPark } from "./domain/parks";
 import { DriverSetRoute, setVehicleRoute, StaffSetRoute, UpsertLandmark, upsertLandmark } from "./domain/landmarks";
@@ -105,6 +108,9 @@ export const payUndo = callable(z.strictObject({ txId: z.string().max(60) }), as
 
 const createTopUp_ = callable(TopUpInput, async (req, data) => createTopUp(await requireMember(req, ["rider"]), data), { secrets: [BACHS_API_KEY] });
 
+/** Pull-to-refresh: re-reads the rider's open checkouts from Bachs in case a webhook is late. */
+const refreshTopUps_ = callable(Empty, async (req) => refreshTopUps(await requireMember(req, ["rider"])), { secrets: [BACHS_API_KEY] });
+
 /** After the trip's estimated time: 1 to 5 stars for the driver, once per ride. */
 const rateDriver_ = callable(RateDriver, async (req, data) => rateDriver(await requireMember(req, ["rider"]), data));
 
@@ -124,6 +130,9 @@ export const payoutBanks = callable(Empty, async (req) => {
   await requireMember(req, ["rider", "driver"]);
   return listBanks();
 }, { secrets: [BACHS_API_KEY] });
+
+/** Proof from the ledger for one of the caller's own fares, top-ups or payouts. */
+const receiptProof_ = callable(ReceiptProofInput, async (req, data) => receiptProof(await requireMember(req, ["rider", "driver"]), data));
 
 /* ----------------------------------------------------------------- drivers */
 
@@ -234,6 +243,9 @@ export const bachsWebhook = onRequest(
   handleBachsWebhook,
 );
 
+/** The public receipt check the QR on every receipt opens. Read-only; shows no names or balances. */
+export const receipt = onRequest({ region: REGION, memory: "256MiB", timeoutSeconds: 15, maxInstances: 10, cors: false }, handleReceiptPage);
+
 /* -------------------------------------------------------------------- jobs */
 
 const job = { region: REGION, timeZone: "Africa/Lagos", secrets: [BACHS_API_KEY], timeoutSeconds: 540, memory: "512MiB" as const, retryCount: 1 };
@@ -258,6 +270,8 @@ export {
   lockMyAccount_ as lockMyAccount,
   registerDevice_ as registerDevice,
   createTopUp_ as createTopUp,
+  refreshTopUps_ as refreshTopUps,
+  receiptProof_ as receiptProof,
   openDispute_ as openDispute,
   rateDriver_ as rateDriver,
 };
