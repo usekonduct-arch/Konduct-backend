@@ -35,6 +35,8 @@ before(async () => {
     await setDoc(doc(db, "routes/r1"), { name: "Main Gate", fareKobo: 20000 });
     await setDoc(doc(db, "config/switches"), { paymentsPaused: false });
     await setDoc(doc(db, "config/fleet"), { busSeats: 7 });
+    await setDoc(doc(db, "supportThreads/t1"), { uid: "alice", status: "open", lastFrom: "staff", lastAtMs: 5, memberReadAtMs: 1 });
+    await setDoc(doc(db, "supportThreads/t1/messages/m1"), { from: "staff", text: "Hi Alice" });
     await setDoc(doc(db, "landmarks/gate"), { name: "Main gate", lat: 7.7553, lng: 4.5476, active: true });
     await setDoc(doc(db, "ratings/fare_1"), { driverUid: "tunde", riderUid: "alice", stars: 2, comment: "Rough driving" });
     await setDoc(doc(db, "parks/shasha"), { name: "Shasha park", location: "Shasha, Osogbo", busCount: 4, active: true });
@@ -106,6 +108,24 @@ describe("drivers", () => {
     await assertSucceeds(getDoc(doc(as("tunde", { role: "driver" }), "vehicles/v1")));
     await assertFails(getDoc(doc(as("alice", { role: "rider" }), "vehicles/v1")));
     await assertFails(updateDoc(doc(as("tunde", { role: "driver" }), "vehicles/v1"), { load: { taken: 0 } }));
+  });
+});
+
+describe("support chat", () => {
+  test("members read only their own conversations and may only mark them read", async () => {
+    const alice = as("alice", { role: "rider" });
+    const bob = as("bob", { role: "rider" });
+    await assertSucceeds(getDoc(doc(alice, "supportThreads/t1")));
+    await assertSucceeds(getDocs(collection(alice, "supportThreads/t1/messages")));
+    await assertSucceeds(getDocs(query(collection(alice, "supportThreads"), where("uid", "==", "alice"))));
+    await assertSucceeds(updateDoc(doc(alice, "supportThreads/t1"), { memberReadAtMs: 9 }));
+    await assertFails(updateDoc(doc(alice, "supportThreads/t1"), { status: "closed" }));
+    await assertFails(updateDoc(doc(alice, "supportThreads/t1"), { memberReadAtMs: "now" }));
+    await assertFails(setDoc(doc(alice, "supportThreads/t1/messages/m2"), { from: "staff", text: "fake reply" }));
+    await assertFails(setDoc(doc(alice, "supportThreads/t2"), { uid: "alice", status: "open" }));
+    await assertFails(getDoc(doc(bob, "supportThreads/t1")));
+    await assertFails(getDocs(collection(bob, "supportThreads/t1/messages")));
+    await assertFails(updateDoc(doc(bob, "supportThreads/t1"), { memberReadAtMs: 9 }));
   });
 });
 

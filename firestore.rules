@@ -107,6 +107,18 @@ service cloud.firestore {
       allow read: if signedIn();
     }
 
+    // Support chat (domain/support.ts). Members read their own conversations and may only mark
+    // them read; staff read everything. Messages are written by the server.
+    match /supportThreads/{threadId} {
+      allow read: if (signedIn() && resource.data.uid == me()) || staffReader();
+      allow update: if signedIn() && resource.data.uid == me()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberReadAtMs'])
+        && request.resource.data.memberReadAtMs is int;
+      match /messages/{messageId} {
+        allow read: if (signedIn() && get(/databases/$(database)/documents/supportThreads/$(threadId)).data.uid == me()) || staffReader();
+      }
+    }
+
     // Riders' ratings and comments: staff only. Drivers see their average on users/{uid}.
     match /ratings/{txId} {
       allow read: if staffReader();

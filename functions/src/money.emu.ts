@@ -24,6 +24,7 @@ import { setFleet, startNewTrip } from "./domain/seats";
 import { setParkBuses, upsertPark } from "./domain/parks";
 import { setVehicleRoute, upsertLandmark } from "./domain/landmarks";
 import { rateDriver } from "./domain/ratings";
+import { openSupport, replySupport, sendSupport, setSupportStatus } from "./domain/support";
 
 const evtId = () => `evt_${uniq("e")}`;
 
@@ -387,6 +388,40 @@ describe("trip routes and ratings", () => {
     await undoPayment(r.actor, undone.txId);
     await db.doc(`transactions/${undone.txId}`).update({ rateFromMs: Date.now() - 1 });
     assert.equal(await reason(rateDriver(r.actor, { txId: undone.txId, stars: 5, comment: "" })), "not_rateable");
+  });
+});
+
+describe("support chat", () => {
+  test("a rider opens a conversation, staff reply and close it, writing again reopens it", async () => {
+    const r = await makeRider(0);
+    const staff = actorFor(uniq("sup"), "support", { role: "support", status: "active", fullName: "Bisi Ade" });
+    const { threadId } = await openSupport(r.actor, { category: "complaint", message: "The driver was rude to us at Shasha park." });
+    const thread = () => db.doc(`supportThreads/${threadId}`).get();
+    assert.equal((await thread()).get("uid"), r.uid);
+    assert.equal((await thread()).get("lastFrom"), "member");
+
+    await replySupport(staff, { threadId, text: "Sorry about that. Which bus was it?", close: false });
+    assert.equal((await thread()).get("lastFrom"), "staff");
+    const msgs = await db.collection(`supportThreads/${threadId}/messages`).orderBy("atMs").get();
+    assert.deepEqual(msgs.docs.map((d) => d.get("from")), ["member", "staff"]);
+    assert.equal(msgs.docs[1].get("authorName"), "Bisi");
+    const pushes = await db.collection(`users/${r.uid}/notifications`).where("kind", "==", "support.reply").get();
+    assert.equal(pushes.size, 1);
+
+    await setSupportStatus(staff, { threadId, status: "closed" });
+    await sendSupport(r.actor, { threadId, text: "It was OS 482 KJA." });
+    assert.equal((await thread()).get("status"), "open");
+    assert.equal((await thread()).get("messageCount"), 3);
+
+    const other = await makeRider(0);
+    assert.equal(await reason(sendSupport(other.actor, { threadId, text: "hello" })), "no_thread");
+    assert.equal(await reason(openSupport(other.actor, { category: "payment", message: "This one", txId: "fare_notmine12345" })), "bad_tx");
+  });
+
+  test("one person can't flood support with open conversations", async () => {
+    const d = await makeDriverWithVehicle(5_000);
+    for (let i = 0; i < 3; i++) await openSupport(d.actor, { category: "app", message: `Problem ${i}` });
+    assert.equal(await reason(openSupport(d.actor, { category: "app", message: "Another" })), "too_many_open");
   });
 });
 

@@ -1,11 +1,12 @@
 /**
  * Konduct backend: every endpoint the apps and consoles can reach.
  *
+ *  Both      supportOpen, supportSend (chat with staff)
  *  Rider     registerRider (email + password sign-in), setTransactionPin, changePin, payPreview, payConfirm, payUndo, rateDriver,
  *            createTopUp, openDispute, lockMyAccount, registerDevice, riderSetPayoutAccount, riderWithdraw, payoutBanks
  *  Driver    claimDriverAccount (agent's one-time code), (setTransactionPin, changePin, lockMyAccount, registerDevice),
  *            driverConfirmOfflineCode, driverSetPayoutAccount, driverRequestPayout, driverNewTrip, driverSetRoute, payoutBanks
- *  Staff     staff* (MFA + role checked): onboarding, QR, routes, parks, landmarks, trip routes, bus seats, people, switches,
+ *  Staff     staff* (MFA + role checked): onboarding, QR, routes, parks, landmarks, trip routes, bus seats, support, people, switches,
  *            approvals, disputes
  *  Bachs     bachsWebhook (HTTP, signature-verified)
  *  Jobs      dailyPayoutRun, reconcileDaily, reconcilePayoutsJob, disputeSlaWatch
@@ -28,6 +29,7 @@ import { ConfirmInput, confirmOfflineCode, confirmPayment, previewPayment, Previ
 import { SetParkBuses, setParkBuses, UpsertPark, upsertPark } from "./domain/parks";
 import { DriverSetRoute, setVehicleRoute, StaffSetRoute, UpsertLandmark, upsertLandmark } from "./domain/landmarks";
 import { RateDriver, rateDriver } from "./domain/ratings";
+import { openSupport, replySupport, sendSupport, setSupportStatus, StaffSupportReply, StaffSupportStatus, SupportOpen, SupportSend } from "./domain/support";
 import { SetFleet, setFleet, startNewTrip } from "./domain/seats";
 import { listBanks, PayoutAccountInput, requestDriverPayout, requestRiderWithdrawal, setPayoutAccount, WithdrawInput } from "./domain/payouts";
 import {
@@ -85,6 +87,13 @@ const registerDevice_ = callable(
     return { ok: true };
   },
 );
+
+/* ----------------------------------------------------------------- support */
+
+/** A rider or driver starts a conversation with Konduct staff. */
+export const supportOpen = callable(SupportOpen, async (req, data) => openSupport(await requireMember(req, ["rider", "driver"]), data));
+
+export const supportSend = callable(SupportSend, async (req, data) => sendSupport(await requireMember(req, ["rider", "driver"]), data));
 
 /* ------------------------------------------------------------------ riders */
 
@@ -175,6 +184,10 @@ export const staffSetVehicleRoute = callable(StaffSetRoute, async (req, data) =>
   const { vehicleId, ...route } = data;
   return setVehicleRoute(await requireStaff(req, ["agent", "marshal", "ops", "admin"]), vehicleId, route);
 });
+
+export const staffSupportReply = callable(StaffSupportReply, async (req, data) => replySupport(await requireStaff(req, ["support", "ops", "admin"]), data));
+
+export const staffSupportSetStatus = callable(StaffSupportStatus, async (req, data) => setSupportStatus(await requireStaff(req, ["support", "ops", "admin"]), data));
 
 export const staffSetFleet = callable(SetFleet, async (req, data) => setFleet(await requireStaff(req, ["admin"]), data));
 
