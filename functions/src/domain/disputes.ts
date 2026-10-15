@@ -14,6 +14,7 @@ import { naira } from "../lib/money";
 import { driverAccount, InsufficientFunds, type Leg, PLATFORM, prepare, riderAccount } from "../ledger/ledger";
 import { requestApproval } from "./approvals";
 import { notify } from "./notify";
+import { countRefund } from "./stats";
 
 export const OpenDispute = z.strictObject({
   txId: z.string().regex(/^fare_[A-Za-z0-9_-]{8,40}$/),
@@ -103,6 +104,7 @@ export async function executeRefund(disputeId: string, amountKobo: number, byUid
       ];
       const ledger = await prepare(tx, { txId: `refund_${disputeId}`, type: "refund", legs, reversalOf: disputeId, refs: { disputeId } });
       ledger.commit();
+      if (fromDriver) countRefund(tx, { driverUid: d.get("driverUid"), at: Date.now(), amountKobo });
       tx.update(ref, { state: "resolved", resolution: { outcome: "refunded", amountKobo, coveredBy: fromDriver ? "driver" : "konduct", note, byUid }, ...touched() });
       audit({ actor: byUid, action: "dispute.refund", target: ref.path, after: { amountKobo, fromDriver } }, tx);
       return { already: false, payer: d.get("payerUid") as string, reference: d.get("reference") as string };

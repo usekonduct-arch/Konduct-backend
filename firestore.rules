@@ -118,6 +118,16 @@ service cloud.firestore {
       allow read: if signedIn();
     }
 
+    // A driver's own daily figures (domain/stats.ts); staff read all of them.
+    match /driverDays/{id} {
+      allow read: if (signedIn() && resource.data.uid == me()) || staffReader();
+    }
+
+    // Konduct's social handles for share captions (domain/brand.ts).
+    match /config/brand {
+      allow read: if signedIn();
+    }
+
     // Parks and how many buses staff last counted there (domain/parks.ts).
     match /parks/{parkId} {
       allow read: if signedIn();

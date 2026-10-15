@@ -25,6 +25,7 @@ import { naira } from "../lib/money";
 import { driverAccount, InsufficientFunds, prepare, riderAccount } from "../ledger/ledger";
 import { checkPin } from "./accounts";
 import { refreshBoardQuietly } from "./board";
+import { countFare } from "./stats";
 import { notify } from "./notify";
 import { assertOpen, dailyRef, getSwitches, limitsFor, readDaily } from "./policy";
 import { readVehicleToken } from "./qr";
@@ -229,10 +230,12 @@ export async function confirmPayment(actor: Actor, input: z.infer<typeof Confirm
 
       // Seats: re-checked here, where parallel scans of one bus are serialised on its document.
       let load: Load | null = null;
+      let newTrip = true; // a bike ride is its own trip
       if (countsSeats(vehicle.data())) {
         const current = liveLoad(vehicle.data(), now);
         assertSeats(readFleet(fleet).busSeats, current?.taken ?? 0, q.passengers);
         load = boarded(current, q.passengers, now);
+        newTrip = current == null;
       }
 
       // Limits by KYC tier, counting group payments in full (FR-WAL-06, FR-GRP-06).
@@ -311,6 +314,14 @@ export async function confirmPayment(actor: Actor, input: z.infer<typeof Confirm
         ...stamp(),
       });
       if (load) tx.update(vehicle.ref, { load });
+      countFare(tx, {
+        driverUid: q.driverUid,
+        at: now,
+        totalKobo: q.totalKobo,
+        riders: q.passengers,
+        newTrip,
+        route: tripRoute ? `${tripRoute.from} → ${tripRoute.to}` : String(route.get("name") ?? ""),
+      });
       tx.update(quoteRef, { status: "used", txId, ...touched() });
       tx.set(daily.ref, { uid: actor.uid, spendKobo: FieldValue.increment(q.totalKobo), pays: FieldValue.increment(1), ...touched() }, { merge: true });
       tx.create(idemRef, { uid: actor.uid, result: r, expireAt: new Date(now + 48 * 3_600_000), ...stamp() });

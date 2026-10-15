@@ -27,6 +27,9 @@ import { openDispute, resolveDispute, reviewDispute } from "./domain/disputes";
 import { reconcile } from "./domain/recon";
 import { fleetRef, readFleet, setFleet, startNewTrip } from "./domain/seats";
 import { rebuildBoard, refreshBoard, setVehiclePark } from "./domain/board";
+import { backfillDriverDays, driverDayRef } from "./domain/stats";
+import { SetBrand, setBrand } from "./domain/brand";
+import { lagosDay } from "./lib/db";
 import { setParkBuses, upsertPark } from "./domain/parks";
 import { setVehicleRoute, upsertLandmark } from "./domain/landmarks";
 import { rateDriver } from "./domain/ratings";
@@ -1024,5 +1027,83 @@ describe("the riders' bus board", () => {
     await setVehicleStatus(admin(), d.vehicleId, "suspended");
     assert.equal(await entry(d.vehicleId), undefined);
     assert.equal(await reason(setVehiclePark(d.actor, d.vehicleId, parkId)), "vehicle_inactive");
+  });
+});
+
+describe("drivers' daily figures", () => {
+  const today = () => lagosDay();
+  const dayOf = async (uid: string) => (await driverDayRef(uid, today()).get()).data();
+
+  test("each fare counts on the driver's day: money, riders, trips by bus trip, hour and route", async () => {
+    const d = await makeDriverWithVehicle(5_000);
+    const a = await makeRider(100_000);
+    const b = await makeRider(100_000);
+    await pay(a, d.token, { passengers: 2 });
+    await pay(b, d.token, { passengers: 1 }); // same bus trip
+    let day = await dayOf(d.uid);
+    assert.equal(day?.fares, 2);
+    assert.equal(day?.riders, 3);
+    assert.equal(day?.trips, 1);
+    assert.equal(day?.grossKobo, 15_000);
+    assert.equal(day?.month, today().slice(0, 7));
+    assert.equal(Object.values(day?.byHour as Record<string, number>).reduce((x, y) => x + y, 0), 15_000);
+    assert.deepEqual(day?.routes, { "Main Gate → Faculty": 2 });
+
+    await startNewTrip(d.actor);
+    await pay(a, d.token, { passengers: 1, repeat: true });
+    day = await dayOf(d.uid);
+    assert.equal(day?.trips, 2);
+    assert.equal(day?.fares, 3);
+  });
+
+  test("a refund the driver covers is counted against their day", async () => {
+    const d = await makeDriverWithVehicle(20_000);
+    const r = await makeRider(100_000);
+    const out = await pay(r, d.token);
+    await openDispute(r.actor, { txId: out.txId, reason: "charged_twice", note: "" });
+    const sup = actorFor(uniq("sup"), "support", { role: "support", status: "active" });
+    await reviewDispute(sup, out.txId);
+    await resolveDispute(sup, { disputeId: out.txId, outcome: "refund", note: "duplicate" });
+    const day = await dayOf(d.uid);
+    assert.equal(day?.grossKobo, 20_000);
+    assert.equal(day?.refundsKobo, 20_000);
+  });
+
+  test("the one-off backfill rebuilds days from past fares, then never runs again", async () => {
+    const d = await makeDriverWithVehicle(5_000);
+    const r = await makeRider(100_000);
+    await pay(r, d.token, { passengers: 3 });
+    await driverDayRef(d.uid, today()).delete();
+    await db.doc("config/migrations").set({ driverDaysV1: null });
+    await backfillDriverDays();
+    const day = await dayOf(d.uid);
+    assert.equal(day?.fares, 1);
+    assert.equal(day?.riders, 3);
+    assert.equal(day?.trips, 1);
+    assert.equal(day?.grossKobo, 15_000);
+    assert.deepEqual(await backfillDriverDays(), { skipped: true });
+  });
+
+  test("a park with a map pin works as a trip route end", async () => {
+    const d = await makeDriverWithVehicle(5_000);
+    const parkId = uniq("pk");
+    const gate = uniq("lm");
+    await db.doc(`parks/${parkId}`).set({ name: "Shasha park", location: "Junction", active: true, lat: 7.77, lng: 4.55, busCount: 0, ...stamp() });
+    await db.doc(`landmarks/${gate}`).set({ name: "Main gate", active: true, lat: 7.75, lng: 4.56, ...stamp() });
+    const route = await setVehicleRoute(d.actor, d.vehicleId, { fromId: parkId, toId: gate, newTrip: true });
+    assert.equal(route.fromName, "Shasha park");
+    assert.ok(route.etaMin >= 3);
+    const pinless = uniq("pk");
+    await db.doc(`parks/${pinless}`).set({ name: "No pin park", location: "?", active: true, lat: null, lng: null, busCount: 0, ...stamp() });
+    assert.equal(await reason(setVehicleRoute(d.actor, d.vehicleId, { fromId: pinless, toId: gate, newTrip: true })), "no_landmark");
+  });
+
+  test("brand handles are tidied: @ and # added, junk refused", async () => {
+    const admin = actorFor(uniq("adm"), "admin", { role: "admin", status: "active" });
+    const out = await setBrand(admin, SetBrand.parse({ instagram: "ride.konduct", x: "@konduct", tiktok: "", facebook: "", hashtag: "RideKonduct", website: "https://konduct.app" }));
+    assert.equal(out.instagram, "@ride.konduct");
+    assert.equal(out.hashtag, "#RideKonduct");
+    assert.equal((await db.doc("config/brand").get()).get("x"), "@konduct");
+    assert.equal(SetBrand.safeParse({ instagram: "bad handle!", x: "", tiktok: "", facebook: "", hashtag: "", website: "" }).success, false);
   });
 });

@@ -1,6 +1,6 @@
 /**
  * Landmarks and trip routes. An admin adds the landmarks riders know (Shasha park, Main gate,
- * Senate building...) with a map pin. Before each trip the driver picks where the bus is going
+ * Senate building...) with a map pin; every park with a map pin counts as a place too. Before each trip the driver picks where the bus is going
  * from and to; staff can change it for them. The estimated time comes from the two pins, and a
  * rider can rate the driver once that time has passed (ratings.ts).
  *
@@ -95,10 +95,21 @@ export async function setVehicleRoute(actor: Actor, vehicleId: string | undefine
   if (!vehicleId) fail("failed-precondition", "no_vehicle", "Your account isn't linked to a vehicle yet. Talk to a Konduct agent.");
   const ref = db.doc(`vehicles/${vehicleId}`);
   return db.runTransaction(async (tx) => {
-    const [v, from, to] = await tx.getAll(ref, db.doc(`landmarks/${input.fromId}`), db.doc(`landmarks/${input.toId}`));
+    const [v, lFrom, lTo, pFrom, pTo] = await tx.getAll(
+      ref,
+      db.doc(`landmarks/${input.fromId}`),
+      db.doc(`landmarks/${input.toId}`),
+      db.doc(`parks/${input.fromId}`),
+      db.doc(`parks/${input.toId}`),
+    );
     if (!v.exists) fail("not-found", "no_vehicle", "Unknown vehicle.");
     if (!staff && v.get("driverUid") !== actor.uid) fail("permission-denied", "not_your_vehicle", "This vehicle isn't linked to your account.");
     if (v.get("status") === "retired") fail("failed-precondition", "vehicle_inactive", "This vehicle is retired.");
+    // A place is a landmark, or else a park with a map pin (most trips start at a park).
+    const place = (l: FirebaseFirestore.DocumentSnapshot, p: FirebaseFirestore.DocumentSnapshot) =>
+      l.exists ? l : p.exists && p.get("lat") != null && p.get("lng") != null ? p : l;
+    const from = place(lFrom, pFrom);
+    const to = place(lTo, pTo);
     for (const l of [from, to]) if (!l.exists || l.get("active") !== true) fail("not-found", "no_landmark", "That place isn't on the list any more. Pick another.");
     const a = { lat: from.get("lat") as number, lng: from.get("lng") as number };
     const b = { lat: to.get("lat") as number, lng: to.get("lng") as number };

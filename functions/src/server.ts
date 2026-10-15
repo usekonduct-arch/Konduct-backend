@@ -28,6 +28,7 @@ import { safeEqual } from "./lib/crypto";
 import { auth } from "./lib/db";
 import { JOBS } from "./jobs";
 import { rebuildBoard } from "./domain/board";
+import { backfillDriverDays } from "./domain/stats";
 import * as endpoints from "./index";
 
 const REQUIRED_ENV = [
@@ -180,4 +181,6 @@ app.listen(port, () => {
   rebuildBoard()
     .then((r) => logger.info("bus board rebuilt", r))
     .catch((e) => logger.error("bus board rebuild failed", { err: (e as Error).message }));
+  // Once: drivers' daily figures for fares paid before they were kept.
+  backfillDriverDays().catch((e) => logger.error("driver days backfill failed", { err: (e as Error).message }));
 });

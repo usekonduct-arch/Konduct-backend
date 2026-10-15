@@ -61,6 +61,7 @@ import {
   UpsertRoute,
   upsertRoute,
 } from "./domain/staff";
+import { SetBrand, setBrand } from "./domain/brand";
 import { AddStaff, addStaff, markPasswordChosen, resetStaffPassword, revokeStaff, SetStaffRole, setStaffRole, StaffUid } from "./domain/team";
 
 const PAY_MIN = Number(process.env.MIN_INSTANCES_PAY ?? 0); // 1 in production: no cold start on the pay path
@@ -301,6 +302,9 @@ export const staffReviewDispute = callable(z.strictObject({ disputeId: idField }
 export const staffSendNotice = callable(SendNotice, async (req, data) => sendNotice(await requireStaff(req, ["ops", "admin"]), data));
 
 export const staffSetBroadcast = callable(SetBroadcast, async (req, data) => setBroadcastActive(await requireStaff(req, ["ops", "admin"]), data));
+
+/** The social handles and hashtag the apps put in captions when someone shares a ride or their Wrapped. */
+export const staffSetBrand = callable(SetBrand, async (req, data) => setBrand(await requireStaff(req, ["ops", "admin"]), data));
 
 /** Carousel and popup ads in the apps. */
 export const staffUpsertAd = callable(UpsertAd, async (req, data) => upsertAd(await requireStaff(req, ["ops", "admin"]), data));
