@@ -11,7 +11,7 @@ import { auth, db, stamp } from "./lib/db";
 import { isHttpsError } from "./lib/errors";
 import { driverAccount, PLATFORM, riderAccount, verifyAccount } from "./ledger/ledger";
 import { confirmPayment, previewPayment, undoPayment } from "./domain/pay";
-import { createTopUp, refreshTopUps } from "./domain/funding";
+import { createTopUp, reconcileTopUps, refreshTopUps } from "./domain/funding";
 import { lookUpReceipt, receiptProof } from "./domain/receipts";
 import { deleteAd, sendNotice, uploadMedia, upsertAd } from "./domain/messaging";
 import { handleBachsWebhook } from "./bachs/webhook";
@@ -503,6 +503,27 @@ describe("funding via Bachs", () => {
     assert.equal(await lookUpReceipt(flipped), null);
     const other = await makeRider(0);
     assert.equal((await receiptProof(other.actor, { kind: "topup", id: t.topupId })).posted, false);
+  });
+
+  test("a payment Bachs reports without our reference is matched by its checkout id", async () => {
+    const r = await makeRider(0);
+    const t = await openTopUp(r);
+    // Bachs only includes the reference "when available": neither the event nor the lookup has it.
+    onBachs("GET", "/v1/checkout-sessions/", () => ({ json: { ...paidCheckout(t.topupId), reference: null, metadata: {} } }));
+    const e = webhook({ id: evtId(), type: "collection.succeeded", organization_id: "acct_konduct", data: { checkout_id: "chk_test123", charge_id: "ch_test123", status: "SUCCEEDED", amount: "2000.00", currency: "NGN" } });
+    await handleBachsWebhook(e.req, e.res);
+    assert.equal(e.res.code, 200);
+    assert.equal(await balance(riderAccount(r.uid)), 200_000);
+    assert.equal((await db.doc(`topups/${t.topupId}`).get()).get("lastCheck").why, "credited");
+  });
+
+  test("the 15-minute job credits a paid top-up whose webhook never came", async () => {
+    const r = await makeRider(0);
+    const t = await openTopUp(r);
+    onBachs("GET", "/v1/checkout-sessions/", () => ({ json: paidCheckout(t.topupId) }));
+    const out = await reconcileTopUps();
+    assert.equal(out.credited >= 1, true);
+    assert.equal(await balance(riderAccount(r.uid)), 200_000);
   });
 
   test("refreshTopUps marks a checkout Bachs has expired, and credits nothing", async () => {

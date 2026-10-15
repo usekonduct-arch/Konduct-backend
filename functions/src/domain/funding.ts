@@ -11,6 +11,7 @@
  *    the narration, then by a sender account already linked to them. Anything else is parked in
  *    suspense for a human, never guessed.
  */
+import { logger } from "firebase-functions";
 import { z } from "zod";
 
 import { RULES, TOPUP_RETURN_URL } from "../config";
@@ -78,50 +79,113 @@ export async function createTopUp(actor: Actor, input: z.infer<typeof TopUpInput
 }
 
 /**
- * From checkout.completed or collection.succeeded. Idempotent: credits once per top-up whatever
- * order or how many times the events arrive. Re-reads the checkout from Bachs before crediting.
+ * Finds the top-up a Bachs payment belongs to. Bachs sends our reference only "when available",
+ * so fall back to the metadata we attached, then to the checkout id we stored when we opened it.
  */
-export async function settleTopUp(checkoutId: string, reference: string | null) {
-  if (!reference?.startsWith("tu_")) return { handled: false as const, why: "not a top-up" };
-  const ref = db.doc(`topups/${reference}`);
-  const t = await ref.get();
-  if (!t.exists) return { handled: false as const, why: "unknown top-up" };
+async function findTopUp(checkoutId: string, reference: string | null, metaTopupId?: string | null) {
+  for (const id of [reference, metaTopupId]) {
+    if (id?.startsWith("tu_")) {
+      const snap = await db.doc(`topups/${id}`).get();
+      if (snap.exists) return snap;
+    }
+  }
+  const byCheckout = await db.collection("topups").where("checkoutId", "==", checkoutId).limit(1).get();
+  return byCheckout.empty ? null : byCheckout.docs[0];
+}
+
+/**
+ * From checkout.completed or collection.succeeded, the rider's pull-to-refresh, and the
+ * 15-minute job. Idempotent: credits once per top-up whatever order or how many times it runs.
+ * Re-reads the checkout from Bachs before crediting; the reason it did or didn't is kept on the
+ * top-up (lastCheck) so a stuck one can be explained.
+ */
+export async function settleTopUp(checkoutId: string, reference: string | null, metaTopupId?: string | null) {
+  if (!/^[A-Za-z0-9_-]{4,80}$/.test(checkoutId)) return { handled: false as const, why: "bad checkout id" };
+  const t = await findTopUp(checkoutId, reference, metaTopupId);
+  if (!t) return { handled: false as const, why: "not a top-up" };
+  const topupId = t.id;
+  const ref = t.ref;
   if (t.get("status") === "credited") return { handled: true as const, why: "already credited" };
   if (t.get("checkoutId") && t.get("checkoutId") !== checkoutId) {
-    await flag("topup_checkout_mismatch", { topupId: reference, checkoutId });
+    await flag("topup_checkout_mismatch", { topupId, checkoutId });
     return { handled: false as const, why: "checkout mismatch" };
   }
+  const note = (why: string) => ref.update({ lastCheck: { why, atMs: Date.now() } }).catch(() => undefined);
 
-  // SEC-PAY-03: trust the API, not the webhook body.
+  // SEC-PAY-03: trust the API, not the webhook body. The checkout id is the one we stored when we
+  // created this checkout, so it already ties the payment to this top-up.
   const s = await getCheckout(checkoutId);
-  const paid = s.status === "completed" && s.payment_status === "paid";
-  if (!paid) return { handled: false as const, why: `checkout ${s.status}/${s.payment_status}` };
-  if (s.reference !== reference || (s.metadata?.topupId && s.metadata.topupId !== reference)) {
-    await flag("topup_reference_mismatch", { topupId: reference, checkoutId });
+  const status = String(s.status ?? "").toLowerCase();
+  const paymentStatus = String(s.payment_status ?? "").toLowerCase();
+  if (!(status === "completed" && paymentStatus === "paid")) {
+    const why = `checkout ${status || "?"}/${paymentStatus || "?"}`;
+    await note(why);
+    return { handled: false as const, why };
+  }
+  // A reference or metadata Bachs does return must still be ours.
+  if ((s.checkout_id && s.checkout_id !== checkoutId) || (s.reference && s.reference !== topupId) || (s.metadata?.topupId && s.metadata.topupId !== topupId)) {
+    await flag("topup_reference_mismatch", { topupId, checkoutId });
+    await note("reference mismatch");
     return { handled: false as const, why: "reference mismatch" };
   }
-  const currency = s.charge?.currency ?? s.currency;
+  const currency = String(s.charge?.currency ?? s.currency ?? "").toUpperCase();
   if (currency !== "NGN") {
-    await flag("topup_currency_mismatch", { topupId: reference, checkoutId, currency: currency ?? null });
+    await flag("topup_currency_mismatch", { topupId, checkoutId, currency: currency || null });
+    await note(`currency ${currency || "?"}`);
     return { handled: false as const, why: "currency" };
   }
   const paidKobo = toKobo(s.charge?.amount ?? s.amount ?? "0");
   const settledKobo = s.charge?.settlement_amount ? toKobo(s.charge.settlement_amount) : paidKobo;
-  if (paidKobo <= 0 || settledKobo > paidKobo) return { handled: false as const, why: "bad amounts" };
-  if (paidKobo !== t.get("amountKobo")) await flag("topup_amount_differs", { topupId: reference, expected: t.get("amountKobo"), paid: paidKobo });
+  if (paidKobo <= 0 || settledKobo > paidKobo) {
+    await note("bad amounts");
+    return { handled: false as const, why: "bad amounts" };
+  }
+  if (paidKobo !== t.get("amountKobo")) await flag("topup_amount_differs", { topupId, expected: t.get("amountKobo"), paid: paidKobo });
 
   const uid = t.get("uid") as string;
   await creditRider({
-    txId: `topup_${reference}`,
+    txId: `topup_${topupId}`,
     uid,
     paidKobo,
     settledKobo,
     type: "topup",
-    refs: { topupId: reference, checkoutId, chargeId: s.charge?.id ?? null },
-    after: (tx) => tx.update(ref, { status: "credited", creditedKobo: paidKobo, chargeId: s.charge?.id ?? null, ...touched() }),
+    refs: { topupId, checkoutId, chargeId: s.charge?.id ?? null },
+    after: (tx) => tx.update(ref, { status: "credited", creditedKobo: paidKobo, chargeId: s.charge?.id ?? null, lastCheck: { why: "credited", atMs: Date.now() }, ...touched() }),
   });
   await notify(uid, "wallet.funded", { title: `${naira(paidKobo)} added`, body: "Your Konduct wallet is topped up.", data: { amountKobo: String(paidKobo) } });
   return { handled: true as const, why: "credited" };
+}
+
+/** Re-checks open top-ups with Bachs: credits the paid ones, closes the expired ones. */
+async function recheck(docs: FirebaseFirestore.QueryDocumentSnapshot[]) {
+  let credited = 0;
+  for (const d of docs) {
+    const checkoutId = d.get("checkoutId") as string | null;
+    if (!checkoutId) continue;
+    try {
+      const r = await settleTopUp(checkoutId, d.id);
+      if (r.why === "credited") credited += 1;
+      else if (r.why.startsWith("checkout expired")) await expireTopUp(d.id);
+    } catch (e) {
+      // Bachs unreachable: the webhook, the next refresh or the next job run will settle it.
+      await d.ref.update({ lastCheck: { why: `bachs unreachable: ${(e as Error).message.slice(0, 80)}`, atMs: Date.now() } }).catch(() => undefined);
+    }
+  }
+  return credited;
+}
+
+/**
+ * Every 15 minutes (with the payout check): open top-ups from the last two days are re-checked,
+ * so a paid top-up lands even if Bachs's webhook never reaches us.
+ */
+export async function reconcileTopUps() {
+  // Filtered by age here rather than in the query, so it needs no extra Firestore index.
+  const since = Date.now() - 2 * 86_400_000;
+  const open = await db.collection("topups").where("status", "==", "open").limit(200).get();
+  const recent = open.docs.filter((d) => (d.get("createdAt")?.toMillis?.() ?? 0) >= since);
+  const credited = await recheck(recent);
+  if (credited) logger.info("top-ups credited by reconcile", { credited, checked: recent.length });
+  return { checked: recent.length, credited };
 }
 
 /**
@@ -132,24 +196,17 @@ export async function settleTopUp(checkoutId: string, reference: string | null) 
 export async function refreshTopUps(actor: Actor) {
   await rateLimit(actor.uid, "topup_refresh", 10, 60_000);
   const open = await db.collection("topups").where("uid", "==", actor.uid).where("status", "==", "open").limit(5).get();
-  let credited = 0;
-  for (const d of open.docs) {
-    const checkoutId = d.get("checkoutId") as string | null;
-    if (!checkoutId) continue;
-    try {
-      const r = await settleTopUp(checkoutId, d.id);
-      if (r.why === "credited") credited += 1;
-      else if (r.why.startsWith("checkout expired")) await expireTopUp(d.id);
-    } catch {
-      // Bachs unreachable: the webhook (or the next refresh) will settle it.
-    }
-  }
+  const credited = await recheck(open.docs);
   return { checked: open.size, credited };
 }
 
-export async function expireTopUp(reference: string | null) {
-  if (!reference?.startsWith("tu_")) return;
-  const ref = db.doc(`topups/${reference}`);
+export async function expireTopUp(reference: string | null, checkoutId?: string | null) {
+  let ref = reference?.startsWith("tu_") ? db.doc(`topups/${reference}`) : null;
+  if (!ref && checkoutId) {
+    const q = await db.collection("topups").where("checkoutId", "==", checkoutId).limit(1).get();
+    ref = q.empty ? null : q.docs[0].ref;
+  }
+  if (!ref) return;
   await db.runTransaction(async (tx) => {
     const t = await tx.get(ref);
     if (t.exists && t.get("status") === "open") tx.update(ref, { status: "expired", ...touched() });

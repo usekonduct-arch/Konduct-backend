@@ -7,6 +7,9 @@
  *  - truth:     money is credited only after the domain code re-reads Bachs's API
  *  - responses: 400 for forged/unknown deliveries (Bachs stops retrying), 5xx when *we* failed
  *               (Bachs retries up to 5 times), 200 once stored and processed
+ *  - time:      Bachs counts a reply after 10 s as failed. Work still running at 8 s answers 503
+ *               (Bachs retries; the retry finds it processed and gets 200), so a slow Bachs or
+ *               Firestore never turns into a delivery Bachs gives up on.
  */
 import type { Request } from "firebase-functions/v2/https";
 import type { Response } from "express";
@@ -87,15 +90,23 @@ export async function handleBachsWebhook(req: Request, res: Response) {
   if (go === "done") return void res.status(200).send("duplicate");
   if (go === "busy") return void res.status(503).send("in progress");
 
-  try {
-    const outcome = await route(event, fromConnected);
-    await ref.update({ status: "processed", outcome, processedAt: FieldValue.serverTimestamp(), ...touched() });
-    res.status(200).send("ok");
-  } catch (e) {
-    logger.error("bachs webhook processing failed", { type: event.type, id: event.id, err: (e as Error).message });
-    await ref.update({ status: "failed", error: (e as Error).message.slice(0, 200), ...touched() });
-    res.status(500).send("retry");
+  const work = route(event, fromConnected).then(
+    async (outcome) => {
+      await ref.update({ status: "processed", outcome, processedAt: FieldValue.serverTimestamp(), ...touched() });
+      return true;
+    },
+    async (e: Error) => {
+      logger.error("bachs webhook processing failed", { type: event.type, id: event.id, err: e.message });
+      await ref.update({ status: "failed", error: e.message.slice(0, 200), ...touched() });
+      return false;
+    },
+  );
+  const inTime = await Promise.race([work, new Promise<"late">((r) => setTimeout(() => r("late"), 8_000))]);
+  if (inTime === "late") {
+    logger.warn("bachs webhook slow; asked Bachs to retry", { type: event.type, id: event.id });
+    return void res.status(503).send("still working");
   }
+  res.status(inTime ? 200 : 500).send(inTime ? "ok" : "retry");
 }
 
 async function route(e: Event, fromConnected: boolean): Promise<string> {
@@ -103,14 +114,14 @@ async function route(e: Event, fromConnected: boolean): Promise<string> {
   switch (e.type) {
     case "collection.succeeded": {
       if (fromConnected) return "ignored: driver accounts don't collect";
-      if (d.checkout_id) return (await settleTopUp(String(d.checkout_id), d.reference ?? null)).why;
+      if (d.checkout_id) return (await settleTopUp(String(d.checkout_id), d.reference ?? null, d.metadata?.topupId ?? null)).why;
       return (await settleDeposit(e.id, d as Parameters<typeof settleDeposit>[1])).why;
     }
     case "checkout.completed":
       if (fromConnected || d.payment_status !== "paid") return "ignored";
-      return (await settleTopUp(String(d.checkout_id), d.reference ?? null)).why;
+      return (await settleTopUp(String(d.checkout_id), d.reference ?? null, d.metadata?.topupId ?? null)).why;
     case "checkout.expired":
-      await expireTopUp(d.reference ?? null);
+      await expireTopUp(d.reference ?? d.metadata?.topupId ?? null, d.checkout_id ? String(d.checkout_id) : null);
       return "expired";
     case "payout.paid":
     case "payout.failed":

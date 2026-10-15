@@ -6,6 +6,7 @@ import { logger } from "firebase-functions";
 
 import { db, touched } from "./lib/db";
 import { payoutDriver, reconcilePayouts } from "./domain/payouts";
+import { reconcileTopUps } from "./domain/funding";
 import { reconcile } from "./domain/recon";
 
 /** FR-DRV-03: daily automatic payout is the default, after the evening rush. */
@@ -36,6 +37,8 @@ async function disputeSlaWatch() {
 export const JOBS: Record<string, () => Promise<unknown>> = {
   dailyPayoutRun,
   reconcileDaily: reconcile,
-  reconcilePayoutsJob: reconcilePayouts,
+  // The 15-minute cron also re-checks open top-ups, so no extra cron entry is needed.
+  reconcilePayoutsJob: async () => ({ payouts: await reconcilePayouts(), topups: await reconcileTopUps() }),
+  reconcileTopUpsJob: reconcileTopUps,
   disputeSlaWatch,
 };
