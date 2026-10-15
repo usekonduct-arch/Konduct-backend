@@ -7,6 +7,8 @@ import { makeVehicleToken, readVehicleToken } from "./domain/qr";
 import { canonical, cleanCode, hmacCode, randomCode } from "./lib/crypto";
 import { naira, toDecimal, toKobo } from "./lib/money";
 import { namesMatch } from "./domain/payouts";
+import { decodeCallableData } from "./api/callable";
+import { TopUpInput } from "./domain/funding";
 import { distanceKm, etaMinutes, roadKm } from "./domain/landmarks";
 import { alighted, assertSeats, boarded, countsSeats, liveLoad } from "./domain/seats";
 import { RULES } from "./config";
@@ -129,4 +131,19 @@ test("trip estimates come from the two landmarks' pins", () => {
   assert.equal(etaMinutes(gate, shasha), 11); // 2.85 km at 20 km/h = 8.6 min, + 2 min of stops, rounded up
   assert.equal(etaMinutes(gate, shasha), etaMinutes(shasha, gate));
   assert.equal(etaMinutes(gate, { lat: 7.7554, lng: 4.5476 }), RULES.minTripMinutes); // next door
+});
+
+test("numbers wrapped by the Android Firebase SDK are unwrapped before validation", () => {
+  const long = (v: string) => ({ "@type": "type.googleapis.com/google.protobuf.Int64Value", value: v });
+  const fromAndroid = { amountKobo: long("200000"), idempotencyKey: "abcdefghijklmnop1234" };
+  assert.equal(TopUpInput.safeParse(fromAndroid).success, false); // what Render did before
+  const decoded = decodeCallableData(fromAndroid);
+  assert.deepEqual(decoded, { amountKobo: 200000, idempotencyKey: "abcdefghijklmnop1234" });
+  assert.equal(TopUpInput.safeParse(decoded).success, true);
+  // Nested values, arrays, unsigned longs and plain JSON pass through correctly.
+  assert.deepEqual(decodeCallableData({ a: [long("1"), { b: long("-2") }], c: "x", d: 3, e: null, f: true }), { a: [1, { b: -2 }], c: "x", d: 3, e: null, f: true });
+  assert.equal(decodeCallableData({ "@type": "type.googleapis.com/google.protobuf.UInt64Value", value: "7" }), 7);
+  // Anything else carrying "@type" is refused.
+  assert.throws(() => decodeCallableData({ "@type": "type.googleapis.com/google.protobuf.Any", value: "1" }));
+  assert.throws(() => decodeCallableData({ "@type": "type.googleapis.com/google.protobuf.Int64Value", value: "abc" }));
 });

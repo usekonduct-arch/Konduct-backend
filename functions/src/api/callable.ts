@@ -49,3 +49,24 @@ export function callable<S extends z.ZodType, R>(schema: S, handler: (req: Calla
 }
 
 export const Empty = z.strictObject({});
+
+const LONG_TYPES = new Set(["type.googleapis.com/google.protobuf.Int64Value", "type.googleapis.com/google.protobuf.UInt64Value"]);
+
+/**
+ * The Firebase callable wire format sends 64-bit integers wrapped, as
+ * {"@type": "type.googleapis.com/google.protobuf.Int64Value", "value": "200000"}. The Android SDK
+ * does this for every Dart int. Cloud Functions' onCall unwraps them before the handler runs; the
+ * Render server (server.ts) calls `run` directly, so it unwraps them here, the same way.
+ * Anything else carrying an "@type" is refused.
+ */
+export function decodeCallableData(data: unknown): unknown {
+  if (data === null || typeof data !== "object") return data;
+  if (Array.isArray(data)) return data.map(decodeCallableData);
+  const obj = data as Record<string, unknown>;
+  if ("@type" in obj) {
+    const value = typeof obj.value === "string" ? Number(obj.value) : NaN;
+    if (!LONG_TYPES.has(String(obj["@type"])) || !Number.isFinite(value)) throw new Error("undecodable callable value");
+    return value;
+  }
+  return Object.fromEntries(Object.entries(obj).map(([k, v]) => [k, decodeCallableData(v)]));
+}

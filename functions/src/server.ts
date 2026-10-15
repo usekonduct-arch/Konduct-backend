@@ -17,7 +17,7 @@ import { logger } from "firebase-functions";
 import { HttpsError, type CallableRequest, type Request } from "firebase-functions/v2/https";
 import { getAppCheck } from "firebase-admin/app-check";
 
-import type { Callable } from "./api/callable";
+import { type Callable, decodeCallableData } from "./api/callable";
 import { ENFORCE_APP_CHECK } from "./config";
 import { handleBachsWebhook } from "./bachs/webhook";
 import { safeEqual } from "./lib/crypto";
@@ -112,6 +112,14 @@ app.post("/:name", express.json({ limit: "64kb", verify: keepRaw }), async (req,
     return sendError(res, new HttpsError("invalid-argument", "Bad request."));
   }
 
+  // Unwrap the callable wire format (64-bit integers from Android arrive wrapped), as onCall does.
+  let data: unknown;
+  try {
+    data = decodeCallableData(req.body.data);
+  } catch {
+    return sendError(res, new HttpsError("invalid-argument", "Bad request."));
+  }
+
   // Same token checks onCall does before running the handler.
   let authData: CallableRequest["auth"];
   const bearer = req.get("authorization")?.match(/^Bearer (.+)$/)?.[1];
@@ -138,7 +146,7 @@ app.post("/:name", express.json({ limit: "64kb", verify: keepRaw }), async (req,
   if (ENFORCE_APP_CHECK && !appData) return sendError(res, new HttpsError("unauthenticated", "Update the app and try again."));
 
   try {
-    const result = await fn.run({ data: req.body.data, auth: authData, app: appData, rawRequest: req as unknown as Request, acceptsStreaming: false });
+    const result = await fn.run({ data, auth: authData, app: appData, rawRequest: req as unknown as Request, acceptsStreaming: false });
     res.status(200).json({ result: result ?? null });
   } catch (e) {
     sendError(res, e instanceof HttpsError ? e : new HttpsError("internal", "Something went wrong on our side. Try again."));
