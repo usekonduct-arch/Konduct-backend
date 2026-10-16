@@ -3,7 +3,7 @@
  * (FR-ADM-03), so with one admin nobody could ever approve the next. After two exist, roles are
  * granted only through staffGrantRole in the console. Refuses to run once there are two admins.
  *
- *   npm run bootstrap-admin -- --email you@konduct.app
+ *   npm run bootstrap-admin -- --email you@konduct.com.ng
  *
  * The person must already have an email/password account with a verified email, and must
  * enrol a second factor (SMS or TOTP) before staff endpoints will accept them (FR-AUTH-04).

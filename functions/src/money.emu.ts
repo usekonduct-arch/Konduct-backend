@@ -903,7 +903,7 @@ describe("approvals and staff messages", () => {
       title: "Ride more",
       body: "",
       imageUrl: "https://example.com/a.jpg",
-      link: "https://konduct.app",
+      link: "https://konduct.com.ng",
       buttons: [{ label: "Learn more", link: "app:topup" }],
       active: true,
       startsAtMs: null,
@@ -1104,7 +1104,7 @@ describe("drivers' daily figures", () => {
 
   test("brand handles are tidied: @ and # added, junk refused", async () => {
     const admin = actorFor(uniq("adm"), "admin", { role: "admin", status: "active" });
-    const out = await setBrand(admin, SetBrand.parse({ instagram: "ride.konduct", x: "@konduct", tiktok: "", facebook: "", hashtag: "RideKonduct", website: "https://konduct.app" }));
+    const out = await setBrand(admin, SetBrand.parse({ instagram: "ride.konduct", x: "@konduct", tiktok: "", facebook: "", hashtag: "RideKonduct", website: "https://konduct.com.ng" }));
     assert.equal(out.instagram, "@ride.konduct");
     assert.equal(out.hashtag, "#RideKonduct");
     assert.equal((await db.doc("config/brand").get()).get("x"), "@konduct");
@@ -1268,9 +1268,9 @@ describe("drivers' rating feedback and app versions", () => {
 
   test("admins set the oldest allowed build; the latest can't be below it", async () => {
     const a = actorFor(uniq("adm"), "admin", { role: "admin", status: "active" });
-    await setAppVersions(a, { rider: { minBuild: 4, latestBuild: 6, updateUrl: "https://konduct.app/get" }, reason: "undo bug fix" });
+    await setAppVersions(a, { rider: { minBuild: 4, latestBuild: 6, updateUrl: "https://konduct.com.ng/get" }, reason: "undo bug fix" });
     assert.equal((await db.doc("config/app").get()).get("rider").minBuild, 4);
-    assert.equal(SetAppVersions.safeParse({ driver: { minBuild: 9, latestBuild: 2, updateUrl: "https://konduct.app/get" }, reason: "typo test" }).success, false);
-    assert.equal(SetAppVersions.safeParse({ driver: { minBuild: 1, latestBuild: 2, updateUrl: "http://konduct.app/get" }, reason: "insecure link" }).success, false);
+    assert.equal(SetAppVersions.safeParse({ driver: { minBuild: 9, latestBuild: 2, updateUrl: "https://konduct.com.ng/get" }, reason: "typo test" }).success, false);
+    assert.equal(SetAppVersions.safeParse({ driver: { minBuild: 1, latestBuild: 2, updateUrl: "http://konduct.com.ng/get" }, reason: "insecure link" }).success, false);
   });
 });

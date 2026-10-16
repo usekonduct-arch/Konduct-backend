@@ -220,7 +220,7 @@ describe("landing-page waitlist", () => {
 
 describe("app versions, referrals and park watches", () => {
   test("anyone can read the app version check, even signed out; nobody can write it", async () => {
-    await env.withSecurityRulesDisabled((ctx) => setDoc(doc(ctx.firestore(), "config/app"), { rider: { minBuild: 3, latestBuild: 5, updateUrl: "https://konduct.app/get" } }));
+    await env.withSecurityRulesDisabled((ctx) => setDoc(doc(ctx.firestore(), "config/app"), { rider: { minBuild: 3, latestBuild: 5, updateUrl: "https://konduct.com.ng/get" } }));
     const anon = env.unauthenticatedContext().firestore();
     await assertSucceeds(getDoc(doc(anon, "config/app")));
     await assertFails(setDoc(doc(as("alice", { role: "rider" }), "config/app"), { rider: { minBuild: 0 } }));
