@@ -30,9 +30,12 @@ export const BACHS_WEBHOOK_SECRETS = defineSecret("BACHS_WEBHOOK_SECRETS");
 /** Our own Bachs account id (acct_...). Webhooks from anyone else are refused. */
 export const BACHS_ACCOUNT_ID = defineString("BACHS_ACCOUNT_ID", { default: "" });
 /** Where the hosted checkout returns the rider. Must be public https. */
-export const TOPUP_RETURN_URL = defineString("TOPUP_RETURN_URL", { default: "https://konduct.app/topup/done" });
-/** Mailbox for Bachs Connect onboarding mail about driver accounts; "{uid}" is replaced. */
-export const DRIVER_CONTACT_EMAIL = defineString("DRIVER_CONTACT_EMAIL", { default: "ops+driver-{uid}@konduct.app" });
+export const TOPUP_RETURN_URL = defineString("TOPUP_RETURN_URL", { default: "https://konduct.com.ng/topup/done" });
+/**
+ * Mailbox for Bachs Connect mail about students' and drivers' payout accounts; "{role}" becomes
+ * "student" or "driver" and "{uid}" the user id. (The name predates students withdrawing.)
+ */
+export const DRIVER_CONTACT_EMAIL = defineString("DRIVER_CONTACT_EMAIL", { default: "ops+{role}-{uid}@konduct.com.ng" });
 
 /**
  * Reject calls without a valid App Check token (SEC-APP-02). Read from functions/.env.

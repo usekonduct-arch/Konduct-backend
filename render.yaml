@@ -19,9 +19,9 @@ services:
       - key: CONSOLE_ORIGINS
         value: https://konduct-console.vercel.app
       - key: TOPUP_RETURN_URL
-        value: https://konduct.app/topup/done
+        value: https://konduct.com.ng/topup/done
       - key: DRIVER_CONTACT_EMAIL
-        value: ops+driver-{uid}@konduct.app
+        value: ops+{role}-{uid}@konduct.com.ng
       - key: BACHS_ACCOUNT_ID
         sync: false
       - key: IDENTITY_KEY
