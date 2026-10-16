@@ -19,7 +19,7 @@ import { z } from "zod";
 import { DRIVER_CONTACT_EMAIL, RULES } from "../config";
 import { logger } from "firebase-functions";
 
-import { BachsError, createDestination, createPayout, createRecipientAccount, createTransfer, getBanks, getDestination, getPayout, listDestinations, type PayoutDestination, updateAccount } from "../bachs/client";
+import { BachsError, createDestination, createPayout, createRecipientAccount, createTransfer, getAccount, getBanks, getDestination, getPayout, listDestinations, type PayoutDestination, updateAccount } from "../bachs/client";
 import { audit } from "../lib/audit";
 import { sha256 } from "../lib/crypto";
 import { db, millis, stamp, touched } from "../lib/db";
@@ -73,17 +73,25 @@ export async function setPayoutAccount(actor: Actor, input: z.infer<typeof Payou
   const userRef = db.doc(`users/${actor.uid}`);
   let bachsAccountId = actor.user.bachsAccountId as string | undefined;
   if (!bachsAccountId) {
-    const acct = await createRecipientAccount(
-      {
-        contact_email: DRIVER_CONTACT_EMAIL.value().replace("{uid}", actor.uid),
-        display_name: actor.user.fullName,
-        country: "NG",
-        entity_type: "individual",
-        configuration: { recipient: { capabilities: { transfers: { requested: true }, payouts: { requested: true } } } },
-      },
-      // Drivers keep the key they were created with; riders get their own.
-      actor.role === "driver" ? `konduct-driver-${actor.uid}` : `konduct-${actor.role}-${actor.uid}`,
-    );
+    let acct;
+    try {
+      acct = await createRecipientAccount(
+        {
+          contact_email: contactEmail(actor.role, actor.uid),
+          display_name: actor.user.fullName,
+          country: "NG",
+          entity_type: "individual",
+          configuration: { recipient: { capabilities: { transfers: { requested: true }, payouts: { requested: true } } } },
+        },
+        // Drivers keep the key they were created with; riders get their own.
+        actor.role === "driver" ? `konduct-driver-${actor.uid}` : `konduct-${actor.role}-${actor.uid}`,
+      );
+    } catch (e) {
+      await noteBankCheck(actor.uid, { step: "create_account", ...bachsFailure(e) });
+      if (e instanceof BachsError && e.uncertain) fail("unavailable", "bank_unreachable", "We couldn't reach the bank just now. Try again in a minute.");
+      // Usually our own Connect set-up (the platform's `connect` capability isn't active), not the user.
+      fail("failed-precondition", "bank_error", `Withdrawals aren't set up yet (${e instanceof BachsError ? e.code : "UNKNOWN"}). Contact Konduct support.`);
+    }
     bachsAccountId = acct.id;
     await db.runTransaction(async (tx) => {
       tx.set(db.doc(`connectAccounts/${acct.id}`), { uid: actor.uid, ...stamp() });
@@ -93,10 +101,14 @@ export async function setPayoutAccount(actor: Actor, input: z.infer<typeof Payou
 
   // Who the account belongs to (Bachs needs it before paying out). It doesn't decide the name check.
   const [first, ...rest] = String(actor.user.fullName).split(" ");
+  const person: Record<string, unknown> = { first_name: first, last_name: rest.join(" ") || first, relationship: { representative: true } };
+  if (actor.user.email) person.email = actor.user.email;
   try {
-    await updateAccount(bachsAccountId, { fields: { persons: [{ first_name: first, last_name: rest.join(" ") || first, relationship: { representative: true } }] } });
+    await updateAccount(bachsAccountId, { fields: { persons: [person] } });
   } catch (e) {
+    // Not fatal here: if Bachs needs more, the destination call below says so and we record it.
     logger.warn("bachs person update failed", { code: e instanceof BachsError ? e.code : "?", requestId: e instanceof BachsError ? e.requestId : null });
+    await noteBankCheck(actor.uid, { step: "person", ...bachsFailure(e) });
   }
 
   const dest = await registerDestination(actor.uid, bachsAccountId, input.bankCode, input.accountNumber);
@@ -133,6 +145,21 @@ const noteBankCheck = (uid: string, check: Record<string, unknown>) =>
     .update({ bankCheck: { ...check, atMs: Date.now() } })
     .catch(() => undefined);
 
+const bachsFailure = (e: unknown) => ({
+  code: e instanceof BachsError ? e.code : "UNKNOWN",
+  detail: (e instanceof BachsError ? e.detail : String(e)).slice(0, 200),
+  requestId: e instanceof BachsError ? e.requestId : null,
+});
+
+/** The Bachs contact mailbox: students and drivers are labelled as what they are. */
+function contactEmail(role: string, uid: string) {
+  const who = role === "rider" ? "student" : role;
+  const template = DRIVER_CONTACT_EMAIL.value();
+  // Older configs were written before students could withdraw and hard-code "driver".
+  const withRole = template.includes("{role}") ? template.replace("{role}", who) : template.replace("+driver-", `+${who}-`);
+  return withRole.replace("{uid}", uid);
+}
+
 const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
@@ -152,8 +179,16 @@ async function registerDestination(uid: string, accountId: string, bankCode: str
       dest = (list.data ?? []).find((d) => d.account_number?.endsWith(accountNumber.slice(-4)) && d.bank_code === bankCode);
     }
     if (!dest) {
-      await noteBankCheck(uid, { step: "register", code, detail: e instanceof BachsError ? e.detail.slice(0, 200) : String(e).slice(0, 200), requestId: e instanceof BachsError ? e.requestId : null });
+      // What the Bachs account still owes, so staff can see why without the logs.
+      const due = await getAccount(accountId).then(
+        (a) => ({ currentlyDue: (a.requirements?.currently_due ?? []).slice(0, 20), capabilities: Object.fromEntries(Object.entries(a.capabilities ?? {}).map(([k, v]) => [k, v.status])) }),
+        () => ({}),
+      );
+      await noteBankCheck(uid, { step: "register", ...bachsFailure(e), ...due });
       if (e instanceof BachsError && e.uncertain) fail("unavailable", "bank_unreachable", "We couldn't reach the bank just now. Try again in a minute.");
+      if (code === "PAYOUT_RECIPIENT_INCOMPLETE" || code === "FORBIDDEN" || code === "PAYOUT_CURRENCY_NOT_ENABLED") {
+        fail("failed-precondition", "bank_error", `Withdrawals aren't switched on for your account yet (${code}). Konduct support has been told; try again later.`);
+      }
       if (/ROUTING|ACCOUNT_NUMBER|REJECTED|INVALID|NOT_FOUND|RESOLVE/.test(code)) {
         fail("invalid-argument", "bank_rejected", "The bank couldn't find that account. Check the bank and the 10-digit number.");
       }

@@ -21,7 +21,7 @@ services:
       - key: TOPUP_RETURN_URL
         value: https://konduct.app/topup/done
       - key: DRIVER_CONTACT_EMAIL
-        value: ops+driver-{uid}@konduct.app
+        value: ops+{role}-{uid}@konduct.app
       - key: BACHS_ACCOUNT_ID
         sync: false
       - key: IDENTITY_KEY
