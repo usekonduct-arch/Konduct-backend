@@ -9,6 +9,7 @@ import { payoutDriver, reconcilePayouts } from "./domain/payouts";
 import { reconcileTopUps } from "./domain/funding";
 import { reconcile } from "./domain/recon";
 import { rebuildBoard } from "./domain/board";
+import { sweepParkWatches } from "./domain/alerts";
 
 /** FR-DRV-03: daily automatic payout is the default, after the evening rush. */
 async function dailyPayoutRun() {
@@ -44,4 +45,6 @@ export const JOBS: Record<string, () => Promise<unknown>> = {
   disputeSlaWatch,
   /** The riders' bus board, rebuilt from every vehicle (the server also does this when it starts). */
   rebuildBoard,
+  /** "Tell me when a bus is here" requests whose time ran out. Hourly is plenty. */
+  sweepParkWatches,
 };

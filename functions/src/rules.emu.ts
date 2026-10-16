@@ -217,3 +217,34 @@ describe("landing-page waitlist", () => {
     await assertFails(setDoc(doc(anon, "waitlist/x6"), noSource));
   });
 });
+
+describe("app versions, referrals and park watches", () => {
+  test("anyone can read the app version check, even signed out; nobody can write it", async () => {
+    await env.withSecurityRulesDisabled((ctx) => setDoc(doc(ctx.firestore(), "config/app"), { rider: { minBuild: 3, latestBuild: 5, updateUrl: "https://konduct.app/get" } }));
+    const anon = env.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(anon, "config/app")));
+    await assertFails(setDoc(doc(as("alice", { role: "rider" }), "config/app"), { rider: { minBuild: 0 } }));
+  });
+
+  test("riders read the referral settings but never codes or who referred whom", async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      await setDoc(doc(db, "config/referrals"), { enabled: true, bonusKobo: 20000, welcomeKobo: 10000 });
+      await setDoc(doc(db, "referralCodes/AB12CD"), { uid: "bob" });
+      await setDoc(doc(db, "referrals/alice"), { referrerUid: "bob", refereeUid: "alice", status: "pending" });
+    });
+    const alice = as("alice", { role: "rider" });
+    await assertSucceeds(getDoc(doc(alice, "config/referrals")));
+    await assertFails(getDoc(doc(env.unauthenticatedContext().firestore(), "config/referrals")));
+    await assertFails(getDoc(doc(alice, "referralCodes/AB12CD")));
+    await assertFails(getDoc(doc(alice, "referrals/alice")));
+    await assertFails(setDoc(doc(alice, "referrals/bob"), { referrerUid: "alice", status: "rewarded" }));
+  });
+
+  test("a rider sees only their own park watches and can't make one", async () => {
+    await env.withSecurityRulesDisabled((ctx) => setDoc(doc(ctx.firestore(), "parkWatches/shasha__alice"), { uid: "alice", parkId: "shasha", expiresAtMs: 9e12 }));
+    await assertSucceeds(getDocs(query(collection(as("alice", { role: "rider" }), "parkWatches"), where("uid", "==", "alice"))));
+    await assertFails(getDoc(doc(as("bob", { role: "rider" }), "parkWatches/shasha__alice")));
+    await assertFails(setDoc(doc(as("bob", { role: "rider" }), "parkWatches/shasha__bob"), { uid: "bob", parkId: "shasha", expiresAtMs: 9e12 }));
+  });
+});

@@ -97,6 +97,15 @@ export const RULES = {
   rateWithoutRouteMs: 20 * 60_000,
   /** ...and until this long after paying. */
   rateWindowMs: 7 * 86_400_000,
+  /** Latest ratings a driver sees on their feedback screen. */
+  feedbackShown: 30,
+  /** "Tell me when a bus is here" lasts this long, at most this many parks at once. */
+  parkWatchMs: 90 * 60_000,
+  maxParkWatches: 3,
+  /** A rider can enter a friend's referral code this long after signing up, before their first ride. */
+  referralApplyWindowMs: 14 * 86_400_000,
+  /** Highest reward an admin can set for either side of a referral. */
+  maxReferralBonusKobo: 200_000, // ₦2,000
 } as const;
 
 /** KYC tiers (FR-WAL-06). Tier 1 = phone + student ID. */

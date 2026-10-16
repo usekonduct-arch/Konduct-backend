@@ -1,19 +1,21 @@
 /**
  * Konduct backend: every endpoint the apps and consoles can reach.
  *
- *  Both      supportOpen, supportSend (chat with staff)
+ *  Both      supportOpen, supportSend (chat with staff), setLanguage (push notifications in the app's language)
  *  Rider     registerRider (email + password sign-in), setTransactionPin, changePin, payPreview, payConfirm, rateDriver,
- *            createTopUp, refreshTopUps, openDispute, lockMyAccount, registerDevice, riderSetPayoutAccount, riderWithdraw, payoutBanks
+ *            createTopUp, refreshTopUps, openDispute, lockMyAccount, registerDevice, riderSetPayoutAccount, riderWithdraw, payoutBanks,
+ *            riderWatchPark (tell me when a bus is at this park), riderReferral, riderApplyReferral (invite a friend)
  *  Both      receiptProof (verify a fare, top-up or payout against the ledger)
  *  Driver    claimDriverAccount (agent's one-time code), (setTransactionPin, changePin, lockMyAccount, registerDevice),
- *            driverConfirmOfflineCode, driverSetPayoutAccount, driverRequestPayout, driverNewTrip, driverSetRoute, driverSetPark, payoutBanks
+ *            driverConfirmOfflineCode, driverSetPayoutAccount, driverRequestPayout, driverNewTrip, driverSetRoute, driverSetPark, payoutBanks,
+ *            driverRatingFeedback (what riders said, without who)
  *  Staff     staff* (MFA + role checked): onboarding, staff accounts (staffAddStaff, staffRevokeStaff, ...), editing people, QR, routes, parks, landmarks, trip routes, bus seats, support, people, switches,
  *            approvals, disputes, notifications (staffSendNotice, staffSetBroadcast), ads (staffUpsertAd, staffDeleteAd),
- *            images (staffUploadMedia)
+ *            images (staffUploadMedia), app versions (staffSetAppVersions), referral rewards (staffSetReferrals)
  *  Bachs     bachsWebhook (HTTP, signature-verified)
  *  Public    receipt (HTTP GET /receipt/<code>: anyone with a receipt's QR can check it is genuine),
  *            media (HTTP GET /media/<id>: images for ads and notifications)
- *  Jobs      dailyPayoutRun, reconcileDaily, reconcilePayoutsJob, disputeSlaWatch
+ *  Jobs      dailyPayoutRun, reconcileDaily, reconcilePayoutsJob, disputeSlaWatch (on Render also rebuildBoard, sweepParkWatches)
  */
 import { onRequest } from "firebase-functions/v2/https";
 import { onSchedule } from "firebase-functions/v2/scheduler";
@@ -35,7 +37,11 @@ import { DeleteAd, deleteAd, handleMediaRequest, joinTopic, SendNotice, sendNoti
 import { ConfirmInput, confirmOfflineCode, confirmPayment, previewPayment, PreviewInput } from "./domain/pay";
 import { SetParkBuses, setParkBuses, UpsertPark, upsertPark } from "./domain/parks";
 import { DriverSetRoute, setVehicleRoute, StaffSetRoute, UpsertLandmark, upsertLandmark } from "./domain/landmarks";
-import { RateDriver, rateDriver } from "./domain/ratings";
+import { RateDriver, rateDriver, ratingFeedback } from "./domain/ratings";
+import { isLang, LANGS } from "./domain/i18n";
+import { WatchPark, watchPark } from "./domain/alerts";
+import { ApplyReferral, applyReferral, myReferral, SetReferrals, setReferrals } from "./domain/referrals";
+import { SetAppVersions, setAppVersions } from "./domain/appversion";
 import { openSupport, replySupport, sendSupport, setSupportStatus, StaffSupportReply, StaffSupportStatus, SupportOpen, SupportSend } from "./domain/support";
 import { SetFleet, setFleet, startNewTrip } from "./domain/seats";
 import { DriverSetPark, rebuildBoard, refreshBoardQuietly, setVehiclePark, StaffSetPark } from "./domain/board";
@@ -92,15 +98,30 @@ const changePin_ = callable(z.strictObject({ oldPin: z.string().max(6), newPin: 
 const lockMyAccount_ = callable(Empty, async (req) => lockMyAccount(await requireMember(req, ["rider", "driver"])));
 
 const registerDevice_ = callable(
-  z.strictObject({ deviceId: z.string().regex(/^[A-Za-z0-9_-]{8,64}$/), fcmToken: z.string().min(20).max(4096), platform: z.enum(["android", "ios"]) }),
+  z.strictObject({
+    deviceId: z.string().regex(/^[A-Za-z0-9_-]{8,64}$/),
+    fcmToken: z.string().min(20).max(4096),
+    platform: z.enum(["android", "ios"]),
+    // Older app builds don't send it.
+    lang: z.enum(LANGS).optional(),
+  }),
   async (req, data) => {
     const actor = await requireMember(req, ["rider", "driver"]);
     await db.doc(`users/${actor.uid}/devices/${data.deviceId}`).set({ fcmToken: data.fcmToken, platform: data.platform, active: true, lastSeenAtMs: Date.now(), ...stamp() }, { merge: true });
+    if (data.lang && actor.user.lang !== data.lang) await db.doc(`users/${actor.uid}`).update({ lang: data.lang });
     // Group messages from the console go to the role's topic.
     await joinTopic(data.fcmToken, actor.role);
     return { ok: true };
   },
 );
+
+/** The language the app is set to, so push notifications arrive in it too. */
+export const setLanguage = callable(z.strictObject({ lang: z.string().max(8) }), async (req, data) => {
+  const actor = await requireMember(req, ["rider", "driver"]);
+  if (!isLang(data.lang)) fail("invalid-argument", "bad_lang", "Konduct doesn't have that language yet.");
+  if (actor.user.lang !== data.lang) await db.doc(`users/${actor.uid}`).update({ lang: data.lang });
+  return { lang: data.lang };
+});
 
 /* ----------------------------------------------------------------- support */
 
@@ -142,6 +163,15 @@ export const riderSetPayoutAccount = callable(PayoutAccountInput, async (req, da
 export const riderWithdraw = callable(WithdrawInput, async (req, data) => requestRiderWithdrawal(await requireMember(req, ["rider"]), data), {
   secrets: [BACHS_API_KEY],
 });
+
+/** "Tell me when a bus is here": the next bus with free seats at this park sends a push. */
+export const riderWatchPark = callable(WatchPark, async (req, data) => watchPark(await requireMember(req, ["rider"]), data));
+
+/** The rider's invite card: their code, the rewards and how many friends joined. */
+export const riderReferral = callable(Empty, async (req) => myReferral(await requireMember(req, ["rider"])));
+
+/** A new rider enters a friend's referral code (rewards are paid after their first fare). */
+export const riderApplyReferral = callable(ApplyReferral, async (req, data) => applyReferral(await requireMember(req, ["rider"]), data));
 
 /** The bank picker in both apps. */
 export const payoutBanks = callable(Empty, async (req) => {
@@ -187,6 +217,9 @@ export const driverSetRoute = callable(DriverSetRoute, async (req, data) => {
   await refreshBoardQuietly(actor.user.vehicleId as string | undefined);
   return route;
 });
+
+/** Stars and comments riders left, newest first, without who left them. */
+export const driverRatingFeedback = callable(Empty, async (req) => ratingFeedback(await requireMember(req, ["driver"])));
 
 /* ------------------------------------------------------------------- staff */
 
@@ -305,6 +338,12 @@ export const staffSetBroadcast = callable(SetBroadcast, async (req, data) => set
 
 /** The social handles and hashtag the apps put in captions when someone shares a ride or their Wrapped. */
 export const staffSetBrand = callable(SetBrand, async (req, data) => setBrand(await requireStaff(req, ["ops", "admin"]), data));
+
+/** Oldest app build that may still be used, and the latest one, per app (config/app). */
+export const staffSetAppVersions = callable(SetAppVersions, async (req, data) => setAppVersions(await requireStaff(req, ["admin"]), data));
+
+/** Turn referral rewards on or off and set the amounts (config/referrals). */
+export const staffSetReferrals = callable(SetReferrals, async (req, data) => setReferrals(await requireStaff(req, ["admin"]), data));
 
 /** Carousel and popup ads in the apps. */
 export const staffUpsertAd = callable(UpsertAd, async (req, data) => upsertAd(await requireStaff(req, ["ops", "admin"]), data));

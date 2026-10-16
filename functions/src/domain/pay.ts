@@ -24,11 +24,13 @@ import { type Actor, rateLimit } from "../lib/guards";
 import { naira } from "../lib/money";
 import { driverAccount, InsufficientFunds, prepare, riderAccount } from "../ledger/ledger";
 import { checkPin } from "./accounts";
+import { warnLowBalance } from "./alerts";
 import { refreshBoardQuietly } from "./board";
 import { countFare } from "./stats";
 import { notify } from "./notify";
 import { assertOpen, dailyRef, getSwitches, limitsFor, readDaily } from "./policy";
 import { readVehicleToken } from "./qr";
+import { rewardReferral } from "./referrals";
 import type { CurrentRoute } from "./landmarks";
 import { assertSeats, boarded, countsSeats, fleetRef, liveLoad, type Load, readFleet } from "./seats";
 
@@ -343,6 +345,10 @@ export async function confirmPayment(actor: Actor, input: z.infer<typeof Confirm
   await refreshBoardQuietly(q.vehicleId);
   const riders = q.passengers === 1 ? "1 rider" : `${q.passengers} riders`;
   await notify(q.driverUid, "fare.received", { title: `${naira(q.totalKobo)} received`, body: `${riders} · ${reference}`, data: { txId: result.txId, amountKobo: String(q.totalKobo), riders: String(q.passengers) }, critical: true });
+  // Not enough left for the same ride again: say so now, not at the next bus door.
+  await warnLowBalance(actor.uid, result.balanceKobo, q.fareKobo);
+  // A new rider who came with a friend's code: their first fare pays both of them.
+  await rewardReferral(actor.uid);
   return result;
 }
 
