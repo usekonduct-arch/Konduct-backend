@@ -22,7 +22,7 @@ import { db, FieldValue, millis, stamp, touched } from "../lib/db";
 import { fail, isHttpsError } from "../lib/errors";
 import { type Actor, rateLimit } from "../lib/guards";
 import { naira } from "../lib/money";
-import { driverAccount, InsufficientFunds, prepare, riderAccount } from "../ledger/ledger";
+import { driverAccount, InsufficientFunds, type Leg, prepare, riderAccount, sponsorAccount } from "../ledger/ledger";
 import { checkPin } from "./accounts";
 import { warnLowBalance } from "./alerts";
 import { refreshBoardQuietly } from "./board";
@@ -33,6 +33,7 @@ import { readVehicleToken } from "./qr";
 import { rewardReferral } from "./referrals";
 import type { CurrentRoute } from "./landmarks";
 import { assertSeats, boarded, countsSeats, fleetRef, liveLoad, type Load, readFleet } from "./seats";
+import { checkCoverTx, type Cover, findCover } from "./sponsors";
 
 const firstName = (full: unknown) => String(full ?? "").trim().split(/\s+/)[0] || "Driver";
 
@@ -100,6 +101,9 @@ export async function previewPayment(actor: Actor, input: z.infer<typeof Preview
   const fareKobo = route.get("fareKobo") as number;
   const totalKobo = fareKobo * input.passengers;
   const balanceKobo = (wallet.get("balanceKobo") as number) ?? 0;
+  // A live sponsored-ride offer pays the rider's own seat (sponsors.ts); friends are still theirs.
+  const cover = await findCover(actor.uid, v.driverUid, route.id, fareKobo);
+  const riderKobo = totalKobo - (cover?.coverKobo ?? 0);
   const recentTx = recent.docs[0];
   const quoteId = randomId(16);
 
@@ -113,6 +117,8 @@ export async function previewPayment(actor: Actor, input: z.infer<typeof Preview
     fareKobo,
     passengers: input.passengers,
     totalKobo,
+    riderKobo,
+    cover,
     recentPaidAtMs: recentTx ? recentTx.get("createdAtMs") : null,
     status: "open",
     expiresAtMs: Date.now() + RULES.quoteTtlMs,
@@ -130,9 +136,12 @@ export async function previewPayment(actor: Actor, input: z.infer<typeof Preview
     fareKobo,
     passengers: input.passengers,
     totalKobo,
+    // What leaves the rider's wallet: the total, less a sponsor's cover.
+    riderPaysKobo: riderKobo,
+    sponsored: cover ? { name: cover.sponsorName, logoUrl: cover.logoUrl, title: cover.title, message: cover.message, coverKobo: cover.coverKobo } : null,
     balanceKobo,
-    insufficient: balanceKobo < totalKobo, // show the top-up shortcut (FR-PAY-08)
-    needsPin: totalKobo >= RULES.pinThresholdKobo,
+    insufficient: balanceKobo < riderKobo, // show the top-up shortcut (FR-PAY-08)
+    needsPin: riderKobo >= RULES.pinThresholdKobo,
     // Ask "add another passenger or already paid?" instead of charging silently (FR-GRP-02).
     recentlyPaidThisVehicle: Boolean(recentTx),
     // Warn when a sticker was swapped recently (SEC-QR-02).
@@ -163,7 +172,20 @@ export const ConfirmInput = z.strictObject({
  * undoUntilMs is always the payment time: app builds from before undo was removed read it and
  * show their undo button only while it is in the future, so they never show it.
  */
-type PayResult = { txId: string; reference: string; totalKobo: number; passengers: number; balanceKobo: number; offlineCode: string; undoUntilMs: number; rideTokens: string[] };
+type PayResult = {
+  txId: string;
+  reference: string;
+  totalKobo: number;
+  passengers: number;
+  balanceKobo: number;
+  offlineCode: string;
+  undoUntilMs: number;
+  rideTokens: string[];
+  /** What the rider's wallet paid; less than totalKobo when a sponsor covered a seat. */
+  riderPaidKobo: number;
+  sponsorName: string | null;
+  sponsorLogoUrl: string | null;
+};
 
 export async function confirmPayment(actor: Actor, input: z.infer<typeof ConfirmInput>): Promise<PayResult> {
   const idemRef = db.doc(`idempotency/${sha256(`${actor.uid}|pay|${input.idempotencyKey}`)}`);
@@ -196,7 +218,9 @@ export async function confirmPayment(actor: Actor, input: z.infer<typeof Confirm
     fail("failed-precondition", "repeat_scan", "You paid this vehicle a few minutes ago. Adding another passenger, or did you already pay?");
   }
   const q = quote.data()!;
-  if (q.totalKobo >= RULES.pinThresholdKobo) await checkPin(actor.uid, input.pin);
+  const cover = (q.cover as Cover | null | undefined) ?? null;
+  const riderKobo = (q.riderKobo as number | undefined) ?? q.totalKobo; // quotes from before sponsors existed
+  if (riderKobo >= RULES.pinThresholdKobo) await checkPin(actor.uid, input.pin);
 
   const txId = `fare_${randomId(12)}`;
   const reference = `KD-${randomCode(6)}`;
@@ -207,7 +231,7 @@ export async function confirmPayment(actor: Actor, input: z.infer<typeof Confirm
   let result: PayResult;
   try {
     result = await db.runTransaction(async (tx) => {
-      const [idem, qq, vehicle, driver, rider, route, daily, switchesSnap, fleet] = await tx.getAll(
+      const [idem, qq, vehicle, driver, rider, route, daily, switchesSnap, fleet, riderWallet] = await tx.getAll(
         idemRef,
         quoteRef,
         db.doc(`vehicles/${q.vehicleId}`),
@@ -217,6 +241,7 @@ export async function confirmPayment(actor: Actor, input: z.infer<typeof Confirm
         dailyRef(actor.uid),
         db.doc("config/switches"),
         fleetRef(),
+        db.doc(`wallets/${riderAccount(actor.uid)}`),
       );
       if (idem.exists) return idem.get("result") as PayResult;
       if (qq.get("status") !== "open") fail("failed-precondition", "quote_used", "This scan was already used. Scan again to pay.");
@@ -243,29 +268,39 @@ export async function confirmPayment(actor: Actor, input: z.infer<typeof Confirm
       // Limits by KYC tier, counting group payments in full (FR-WAL-06, FR-GRP-06).
       const lim = limitsFor(rider.get("kycTier"));
       const d = readDaily(daily);
-      if (q.totalKobo > lim.perTxKobo) fail("failed-precondition", "over_tx_limit", `The most you can pay at once is ${naira(lim.perTxKobo)}.`);
-      if (d.spendKobo + q.totalKobo > lim.dailySpendKobo) fail("failed-precondition", "over_daily_limit", `You've reached today's limit of ${naira(lim.dailySpendKobo)}.`);
+      // Limits count what leaves the rider's own wallet.
+      if (riderKobo > lim.perTxKobo) fail("failed-precondition", "over_tx_limit", `The most you can pay at once is ${naira(lim.perTxKobo)}.`);
+      if (d.spendKobo + riderKobo > lim.dailySpendKobo) fail("failed-precondition", "over_daily_limit", `You've reached today's limit of ${naira(lim.dailySpendKobo)}.`);
 
+      // A sponsored seat is re-checked here, against fresh state, so parallel scans can't overspend.
+      const sponsored = cover ? await checkCoverTx(tx, cover, actor.uid, q.driverUid, q.routeId, now) : null;
+      if (sponsored && !sponsored.ok) fail("failed-precondition", "offer_ended", "The sponsored ride offer just ended. Scan again to see your fare.");
+
+      const legs: Leg[] = [{ account: driverAccount(q.driverUid), side: "credit", amountKobo: q.totalKobo }];
+      if (riderKobo > 0) legs.unshift({ account: riderAccount(actor.uid), side: "debit", amountKobo: riderKobo });
+      if (cover) legs.unshift({ account: sponsorAccount(cover.sponsorId), side: "debit", amountKobo: cover.coverKobo });
       const ledger = await prepare(tx, {
         txId,
         type: "fare",
-        legs: [
-          { account: riderAccount(actor.uid), side: "debit", amountKobo: q.totalKobo },
-          { account: driverAccount(q.driverUid), side: "credit", amountKobo: q.totalKobo },
-        ],
-        refs: { quoteId: input.quoteId, vehicleId: q.vehicleId, reference },
+        legs,
+        refs: { quoteId: input.quoteId, vehicleId: q.vehicleId, reference, campaignId: cover?.campaignId ?? null },
       });
       ledger.commit();
+      sponsored?.record();
 
       const r: PayResult = {
         txId,
         reference,
         totalKobo: q.totalKobo,
         passengers: q.passengers,
-        balanceKobo: ledger.balance(riderAccount(actor.uid)),
+        // A fully sponsored ride doesn't touch the rider's wallet, so its balance is read, not posted.
+        balanceKobo: riderKobo > 0 ? ledger.balance(riderAccount(actor.uid)) : ((riderWallet.get("balanceKobo") as number) ?? 0),
         offlineCode,
         undoUntilMs: now,
         rideTokens,
+        riderPaidKobo: riderKobo,
+        sponsorName: cover?.sponsorName ?? null,
+        sponsorLogoUrl: cover?.logoUrl ?? null,
       };
       tx.create(db.doc(`transactions/${txId}`), {
         type: "fare",
@@ -281,6 +316,9 @@ export async function confirmPayment(actor: Actor, input: z.infer<typeof Confirm
         fareKobo: q.fareKobo,
         passengers: q.passengers,
         totalKobo: q.totalKobo,
+        riderPaidKobo: riderKobo,
+        sponsoredKobo: cover?.coverKobo ?? 0,
+        sponsor: cover ? { id: cover.sponsorId, name: cover.sponsorName, logoUrl: cover.logoUrl, campaignId: cover.campaignId, title: cover.title } : null,
         offlineCode,
         driverConfirmedAt: null,
         quoteId: input.quoteId,
@@ -325,14 +363,16 @@ export async function confirmPayment(actor: Actor, input: z.infer<typeof Confirm
         route: tripRoute ? `${tripRoute.from} → ${tripRoute.to}` : String(route.get("name") ?? ""),
       });
       tx.update(quoteRef, { status: "used", txId, ...touched() });
-      tx.set(daily.ref, { uid: actor.uid, spendKobo: FieldValue.increment(q.totalKobo), pays: FieldValue.increment(1), ...touched() }, { merge: true });
+      tx.set(daily.ref, { uid: actor.uid, spendKobo: FieldValue.increment(riderKobo), pays: FieldValue.increment(1), ...touched() }, { merge: true });
       tx.create(idemRef, { uid: actor.uid, result: r, expireAt: new Date(now + 48 * 3_600_000), ...stamp() });
-      audit({ actor: actor.uid, action: "pay.confirm", target: `transactions/${txId}`, after: { totalKobo: q.totalKobo, passengers: q.passengers }, ip: actor.ip }, tx);
+      audit({ actor: actor.uid, action: "pay.confirm", target: `transactions/${txId}`, after: { totalKobo: q.totalKobo, riderKobo, campaignId: cover?.campaignId ?? null, passengers: q.passengers }, ip: actor.ip }, tx);
       return r;
     });
   } catch (e) {
     if (e instanceof InsufficientFunds) {
-      fail("failed-precondition", "insufficient_funds", "Not enough in your wallet. Top up and scan again.", { balanceKobo: e.balanceKobo, neededKobo: q.totalKobo });
+      // The sponsor's budget ran out between the quote and now.
+      if (e.account.startsWith("sponsor_")) fail("failed-precondition", "offer_ended", "The sponsored ride offer just ended. Scan again to see your fare.");
+      fail("failed-precondition", "insufficient_funds", "Not enough in your wallet. Top up and scan again.", { balanceKobo: e.balanceKobo, neededKobo: riderKobo });
     }
     throw e;
   }

@@ -73,6 +73,8 @@ export const UpsertAd = z.strictObject({
   startsAtMs: z.number().int().nonnegative().nullable(),
   endsAtMs: z.number().int().positive().nullable(),
   order: z.number().int().min(0).max(999),
+  /** The sponsor who bought it (sponsors.ts), so its numbers land in their report. "" for house ads. */
+  sponsorId: z.union([z.literal(""), z.string().regex(/^[A-Za-z0-9_-]{6,40}$/)]).default(""),
 });
 
 export const DeleteAd = z.strictObject({ id: z.string().regex(/^[A-Za-z0-9_-]{6,40}$/) });
@@ -154,6 +156,7 @@ export async function setBroadcastActive(actor: Actor, input: z.infer<typeof Set
 
 export async function upsertAd(actor: Actor, input: z.infer<typeof UpsertAd>) {
   if (input.startsAtMs && input.endsAtMs && input.endsAtMs <= input.startsAtMs) fail("invalid-argument", "bad_schedule", "The end must be after the start.");
+  if (input.sponsorId && !(await db.doc(`sponsors/${input.sponsorId}`).get()).exists) fail("not-found", "no_sponsor", "No such sponsor.");
   const { id: given, ...fields } = input;
   const id = given ?? newId();
   const ref = db.doc(`ads/${id}`);

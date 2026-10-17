@@ -17,7 +17,7 @@ import { fail } from "../lib/errors";
 import { type Actor, rateLimit } from "../lib/guards";
 import { naira } from "../lib/money";
 import { publicBase } from "../lib/public";
-import { driverAccount, riderAccount, verifyEntry } from "../ledger/ledger";
+import { driverAccount, riderAccount, sponsorAccount, verifyEntry } from "../ledger/ledger";
 
 export const ReceiptProofInput = z.strictObject({
   kind: z.enum(["fare", "topup", "payout"]),
@@ -33,7 +33,16 @@ export async function receiptProof(actor: Actor, input: z.infer<typeof ReceiptPr
   const account = actor.role === "driver" ? driverAccount(actor.uid) : riderAccount(actor.uid);
   const txId = ledgerTxId(input.kind, input.id);
   // Only this person's own leg: someone else's transaction simply isn't found.
-  const q = await db.collection("ledgerEntries").where("txId", "==", txId).where("account", "==", account).limit(1).get();
+  let q = await db.collection("ledgerEntries").where("txId", "==", txId).where("account", "==", account).limit(1).get();
+  // A ride a sponsor paid in full has no leg on the rider's wallet: its proof is the sponsor's leg,
+  // shown only to the rider who took that ride.
+  if (q.empty && input.kind === "fare" && actor.role === "rider") {
+    const t = await db.doc(`transactions/${txId}`).get();
+    const sponsorId = (t.get("sponsor") as { id?: string } | null | undefined)?.id;
+    if (t.get("payerUid") === actor.uid && sponsorId) {
+      q = await db.collection("ledgerEntries").where("txId", "==", txId).where("account", "==", sponsorAccount(sponsorId)).limit(1).get();
+    }
+  }
   if (q.empty) return { verified: false, posted: false };
   const e = q.docs[0].data();
   const check = await verifyEntry(e);
@@ -79,7 +88,7 @@ export async function lookUpReceipt(code: string) {
   }
   return {
     genuine: check.ok,
-    type: TYPE_LABEL[head.get("type") as string] ?? "Konduct payment",
+    type: String(e.account).startsWith("sponsor_") ? "Sponsored ride fare" : (TYPE_LABEL[head.get("type") as string] ?? "Konduct payment"),
     amountKobo: e.amountKobo as number,
     at: new Date(e.at as number),
     reference: typeof refs.reference === "string" ? refs.reference : txId.slice(-10).toUpperCase(),

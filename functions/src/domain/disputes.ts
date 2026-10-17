@@ -31,12 +31,16 @@ export async function openDispute(actor: Actor, input: z.infer<typeof OpenDisput
     if (!t.exists || t.get("payerUid") !== actor.uid) fail("not-found", "bad_tx", "We couldn't find that payment."); // BOLA-safe: same answer either way
     if (existing.exists) fail("already-exists", "dispute_exists", "You've already reported this payment. We'll update you.");
     if (Date.now() - t.get("createdAtMs") > 30 * 86_400_000) fail("failed-precondition", "too_old", "Payments older than 30 days can't be disputed in the app. Talk to support.");
+    // Only what left the rider's own wallet can come back to it; a sponsor's share never does.
+    const riderPaidKobo = (t.get("riderPaidKobo") as number | undefined) ?? t.get("totalKobo");
+    if (riderPaidKobo <= 0) fail("failed-precondition", "nothing_paid", "A sponsor paid for this ride, so nothing left your wallet. If something went wrong, tell support.");
     tx.create(ref, {
       txId: input.txId,
       reference: t.get("reference"),
       payerUid: actor.uid,
       driverUid: t.get("driverUid"),
       totalKobo: t.get("totalKobo"),
+      riderPaidKobo,
       reason: input.reason,
       messages: [{ from: "rider", text: input.note, atMs: Date.now() }],
       state: "open",
@@ -79,8 +83,10 @@ export async function resolveDispute(actor: Actor, input: z.infer<typeof Resolve
     await notify(d.get("payerUid"), "dispute.update", { title: "Dispute reviewed", body: `We checked ${d.get("reference")}: no refund is due. Tap for details.` });
     return { state: "resolved" };
   }
-  const amountKobo = input.amountKobo ?? d.get("totalKobo");
-  if (amountKobo > d.get("totalKobo")) fail("invalid-argument", "too_much", "A refund can't be more than the payment.");
+  // The most a rider can get back is what they paid; a sponsor's share isn't theirs to refund.
+  const refundable = (d.get("riderPaidKobo") as number | undefined) ?? d.get("totalKobo");
+  const amountKobo = input.amountKobo ?? refundable;
+  if (amountKobo > refundable) fail("invalid-argument", "too_much", `A refund can't be more than the rider paid (${naira(refundable)}).`);
   if (amountKobo > RULES.makerCheckerAboveKobo) {
     await ref.update({ refundRequestedKobo: amountKobo, ...touched() });
     return requestApproval({ kind: "refund", makerUid: actor.uid, target: ref.path, summary: `Refund ${naira(amountKobo)} on ${d.get("reference")}`, payload: { disputeId: input.disputeId, amountKobo } });

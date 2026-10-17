@@ -909,6 +909,7 @@ describe("approvals and staff messages", () => {
       startsAtMs: null,
       endsAtMs: null,
       order: 1,
+      sponsorId: "",
     });
     assert.equal((await db.doc(`ads/${ad.id}`).get()).get("buttons")[0].label, "Learn more");
     await deleteAd(admin(), { id: ad.id });

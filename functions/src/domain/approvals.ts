@@ -9,20 +9,21 @@ import { z } from "zod";
 
 import { CAMPUS_ID } from "../config";
 import { audit } from "../lib/audit";
-import { auth, db, stamp, touched } from "../lib/db";
+import { auth, db, FieldValue, stamp, touched } from "../lib/db";
 import { fail } from "../lib/errors";
 import { type Actor, STAFF_ROLES, type StaffRole } from "../lib/guards";
-import { PLATFORM, prepare, riderAccount, type Side } from "../ledger/ledger";
+import { PLATFORM, prepare, riderAccount, type Side, sponsorAccount } from "../ledger/ledger";
 import { mergeClaims } from "./accounts";
 import { switchesRef } from "./policy";
 
-export type ApprovalKind = "payout_account" | "refund" | "ledger_adjustment" | "deposit_assign" | "kyc_tier" | "role_grant" | "recon_release";
+export type ApprovalKind = "payout_account" | "refund" | "ledger_adjustment" | "deposit_assign" | "sponsor_fund" | "kyc_tier" | "role_grant" | "recon_release";
 
 /** Who may approve each kind. */
 const CHECKERS: Record<ApprovalKind, StaffRole[]> = {
   payout_account: ["admin", "ops"],
   refund: ["admin", "ops"],
   deposit_assign: ["admin", "ops"],
+  sponsor_fund: ["admin"],
   ledger_adjustment: ["admin"],
   kyc_tier: ["admin"],
   role_grant: ["admin"],
@@ -114,6 +115,31 @@ async function execute(kind: ApprovalKind, payload: Record<string, unknown>, che
         tx.update(dep.ref, { status: "credited", uid, matchedBy: "staff", ...touched() });
       });
       return { assigned: uid };
+    }
+    case "sponsor_fund": {
+      // A sponsor's bank transfer becomes their budget (sponsors.ts). The money is already in the
+      // Bachs float (it arrived as an unmatched deposit), so books and bank stay equal.
+      const depositId = String(payload.depositId);
+      const sponsorId = String(payload.sponsorId);
+      await db.runTransaction(async (tx) => {
+        const [dep, sponsor] = await tx.getAll(db.doc(`deposits/${depositId}`), db.doc(`sponsors/${sponsorId}`));
+        if (dep.get("status") !== "unmatched") fail("failed-precondition", "not_unmatched", "This deposit is already assigned.");
+        if (!sponsor.exists) fail("not-found", "no_sponsor", "No such sponsor.");
+        const amountKobo = dep.get("amountKobo") as number;
+        const ledger = await prepare(tx, {
+          txId: `sponsorfund_${depositId}`,
+          type: "sponsor.fund",
+          legs: [
+            { account: PLATFORM.suspense, side: "debit", amountKobo },
+            { account: sponsorAccount(sponsorId), side: "credit", amountKobo },
+          ],
+          refs: { depositId, sponsorId, approvalId },
+        });
+        ledger.commit();
+        tx.update(dep.ref, { status: "credited", sponsorId, matchedBy: "staff", ...touched() });
+        tx.update(sponsor.ref, { fundedKobo: FieldValue.increment(amountKobo), ...touched() });
+      });
+      return { funded: sponsorId };
     }
     case "kyc_tier": {
       const tier = Number(payload.tier);

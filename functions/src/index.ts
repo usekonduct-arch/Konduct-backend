@@ -11,7 +11,9 @@
  *            driverRatingFeedback (what riders said, without who)
  *  Staff     staff* (MFA + role checked): onboarding, staff accounts (staffAddStaff, staffRevokeStaff, ...), editing people, QR, routes, parks, landmarks, trip routes, bus seats, support, people, switches,
  *            approvals, disputes, notifications (staffSendNotice, staffSetBroadcast), ads (staffUpsertAd, staffDeleteAd),
- *            images (staffUploadMedia), app versions (staffSetAppVersions), referral rewards (staffSetReferrals)
+ *            images (staffUploadMedia), app versions (staffSetAppVersions), referral rewards (staffSetReferrals),
+ *            sponsors (staffUpsertSponsor, staffFundSponsor, staffUpsertRideCampaign, staffSetWrappedSponsor)
+ *  Both      trackAds (ad views, taps and shares for sponsors' reports)
  *  Bachs     bachsWebhook (HTTP, signature-verified)
  *  Public    receipt (HTTP GET /receipt/<code>: anyone with a receipt's QR can check it is genuine),
  *            media (HTTP GET /media/<id>: images for ads and notifications)
@@ -42,6 +44,8 @@ import { isLang, LANGS } from "./domain/i18n";
 import { WatchPark, watchPark } from "./domain/alerts";
 import { ApplyReferral, applyReferral, myReferral, SetReferrals, setReferrals } from "./domain/referrals";
 import { SetAppVersions, setAppVersions } from "./domain/appversion";
+import { FundSponsor, requestSponsorFunding, SetWrappedSponsor, setWrappedSponsor, UpsertRideCampaign, upsertRideCampaign, UpsertSponsor, upsertSponsor } from "./domain/sponsors";
+import { TrackAds, trackAds as trackAds_ } from "./domain/adstats";
 import { openSupport, replySupport, sendSupport, setSupportStatus, StaffSupportReply, StaffSupportStatus, SupportOpen, SupportSend } from "./domain/support";
 import { SetFleet, setFleet, startNewTrip } from "./domain/seats";
 import { DriverSetPark, rebuildBoard, refreshBoardQuietly, setVehiclePark, StaffSetPark } from "./domain/board";
@@ -352,6 +356,18 @@ export const staffDeleteAd = callable(DeleteAd, async (req, data) => deleteAd(aw
 
 /** One image for an ad or a notification (the console resizes it first). */
 export const staffUploadMedia = callable(UploadMedia, async (req, data) => uploadMedia(await requireStaff(req, ["ops", "admin"]), data));
+
+/** Sponsors (sponsors.ts): who they are, funding their budget from a deposit, what they buy. */
+export const staffUpsertSponsor = callable(UpsertSponsor, async (req, data) => upsertSponsor(await requireStaff(req, ["ops", "admin"]), data));
+
+export const staffFundSponsor = callable(FundSponsor, async (req, data) => requestSponsorFunding(await requireStaff(req, ["ops", "admin"]), data));
+
+export const staffUpsertRideCampaign = callable(UpsertRideCampaign, async (req, data) => upsertRideCampaign(await requireStaff(req, ["ops", "admin"]), data));
+
+export const staffSetWrappedSponsor = callable(SetWrappedSponsor, async (req, data) => setWrappedSponsor(await requireStaff(req, ["ops", "admin"]), data));
+
+/** The apps' ad views, taps and shares, counted for sponsors' reports (adstats.ts). */
+export const trackAds = callable(TrackAds, async (req, data) => trackAds_(await requireMember(req, ["rider", "driver"]), data));
 
 export const staffResolveDispute = callable(ResolveDispute, async (req, data) => resolveDispute(await requireStaff(req, ["support", "ops", "admin"]), data));
 

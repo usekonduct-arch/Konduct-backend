@@ -19,7 +19,7 @@ import { isKobo } from "../lib/money";
 
 export type Side = "debit" | "credit";
 export type Leg = { account: string; side: Side; amountKobo: number };
-export type AccountKind = "rider" | "driver" | "agent" | "platform";
+export type AccountKind = "rider" | "driver" | "agent" | "sponsor" | "platform";
 
 /** Platform accounts and their normal side. Assets/expenses are debit-normal, liabilities credit-normal. */
 export const PLATFORM = {
@@ -47,6 +47,8 @@ const PLATFORM_NORMAL: Record<string, Side> = {
 export const riderAccount = (uid: string) => `rider_${uid}`;
 export const driverAccount = (uid: string) => `driver_${uid}`;
 export const agentAccount = (uid: string) => `agent_${uid}`;
+/** A sponsor's prepaid budget (sponsors.ts): money Konduct holds for them, spent on the rides they cover. */
+export const sponsorAccount = (sponsorId: string) => `sponsor_${sponsorId}`;
 
 /** Thrown when a person's balance would go below zero (FR-WAL-05). */
 export class InsufficientFunds extends Error {
@@ -62,7 +64,7 @@ function entryHash(prevHash: string, e: Record<string, unknown>) {
 }
 
 /** Creates a person's ledger account (wallet). Safe to call twice inside or outside a transaction. */
-export function openAccountWrite(tx: Transaction, accountId: string, kind: Exclude<AccountKind, "platform">, ownerUid: string) {
+export function openAccountWrite(tx: Transaction, accountId: string, kind: Exclude<AccountKind, "platform">, ownerUid: string | null) {
   tx.set(
     db.doc(`wallets/${accountId}`),
     { kind, ownerUid, normal: "credit", balanceKobo: 0, seq: 0, lastHash: GENESIS, currency: "NGN", ...stamp() },

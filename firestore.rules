@@ -56,6 +56,29 @@ service cloud.firestore {
       allow read: if (member() && resource.data.active == true && resource.data.audience in ['all', request.auth.token.role]) || staffReader();
     }
 
+    // A month's Wrapped sponsor (domain/sponsors.ts): the apps show its logo on that month's Wrapped.
+    match /wrappedSponsors/{month} {
+      allow read: if (member() && resource.data.active == true && resource.data.audience in ['all', request.auth.token.role]) || staffReader();
+    }
+
+    // Sponsors, their ride offers and every ad number: staff only. Members never read these;
+    // sponsored rides reach them through payPreview and their own transactions.
+    match /sponsors/{id} {
+      allow read: if staffReader();
+    }
+    match /rideCampaigns/{id} {
+      allow read: if staffReader();
+    }
+    match /campaignDays/{id} {
+      allow read: if staffReader();
+    }
+    match /adStats/{id} {
+      allow read: if staffReader();
+    }
+    match /adStatsDays/{id} {
+      allow read: if staffReader();
+    }
+
     // Ad and notification images are served by the backend (GET /media/<id>), never read here.
     match /media/{id} {
       allow read: if false;
