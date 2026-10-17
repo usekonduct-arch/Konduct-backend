@@ -11,7 +11,7 @@
  *            driverRatingFeedback (what riders said, without who)
  *  Staff     staff* (MFA + role checked): onboarding, staff accounts (staffAddStaff, staffRevokeStaff, ...), editing people, QR, routes, parks, landmarks, trip routes, bus seats, support, people, switches,
  *            approvals, disputes, notifications (staffSendNotice, staffSetBroadcast), ads (staffUpsertAd, staffDeleteAd),
- *            images (staffUploadMedia), app versions (staffSetAppVersions), referral rewards (staffSetReferrals),
+ *            images (staffUploadMedia), website blog and careers (staffUpsertPost, staffDeletePost, staffUpsertJob, staffDeleteJob, staffSetApplication), app versions (staffSetAppVersions), referral rewards (staffSetReferrals),
  *            sponsors (staffUpsertSponsor, staffFundSponsor, staffUpsertRideCampaign, staffSetWrappedSponsor)
  *  Both      trackAds (ad views, taps and shares for sponsors' reports)
  *  Bachs     bachsWebhook (HTTP, signature-verified)
@@ -30,7 +30,7 @@ import { db, stamp } from "./lib/db";
 import { fail } from "./lib/errors";
 import { JOBS } from "./jobs";
 import { memberToken, requireMember, requireStaff } from "./lib/guards";
-import { changePin, claimDriverAccount, RegisterRider, registerRider, setTransactionPin } from "./domain/accounts";
+import { changePin, claimDriverAccount, LegalVersion, RegisterRider, registerRider, setTransactionPin } from "./domain/accounts";
 import { decide } from "./domain/approvals";
 import { OpenDispute, openDispute, ResolveDispute, resolveDispute, reviewDispute } from "./domain/disputes";
 import { createTopUp, refreshTopUps, TopUpInput } from "./domain/funding";
@@ -48,6 +48,7 @@ import { FundSponsor, requestSponsorFunding, SetWrappedSponsor, setWrappedSponso
 import { TrackAds, trackAds as trackAds_ } from "./domain/adstats";
 import { openSupport, replySupport, sendSupport, setSupportStatus, StaffSupportReply, StaffSupportStatus, SupportOpen, SupportSend } from "./domain/support";
 import { SetFleet, setFleet, startNewTrip } from "./domain/seats";
+import { DeleteSiteItem, deleteJob, deletePost, SetApplication, setApplication, UpsertJob, upsertJob, UpsertPost, upsertPost } from "./domain/site";
 import { DriverSetPark, rebuildBoard, refreshBoardQuietly, setVehiclePark, StaffSetPark } from "./domain/board";
 import { listBanks, PayoutAccountInput, requestDriverPayout, requestRiderWithdrawal, setPayoutAccount, WithdrawInput } from "./domain/payouts";
 import {
@@ -84,9 +85,9 @@ const registerRider_ = callable(RegisterRider, async (req, data) => {
   return registerRider(uid, email, role, data);
 });
 
-const claimDriverAccount_ = callable(z.strictObject({ code: z.string().max(16) }), async (req, data) => {
+const claimDriverAccount_ = callable(z.strictObject({ code: z.string().max(16), legalVersion: LegalVersion }), async (req, data) => {
   const { uid, email, role } = memberToken(req);
-  return claimDriverAccount(uid, email, role, data.code);
+  return claimDriverAccount(uid, email, role, data.code, data.legalVersion);
 }, { secrets: [IDENTITY_KEY] });
 
 const setTransactionPin_ = callable(z.strictObject({ pin: z.string().max(6) }), async (req, data) => {
@@ -356,6 +357,13 @@ export const staffDeleteAd = callable(DeleteAd, async (req, data) => deleteAd(aw
 
 /** One image for an ad or a notification (the console resizes it first). */
 export const staffUploadMedia = callable(UploadMedia, async (req, data) => uploadMedia(await requireStaff(req, ["ops", "admin"]), data));
+
+/** The website's blog and careers (site.ts). Publishing rebuilds the static site. */
+export const staffUpsertPost = callable(UpsertPost, async (req, data) => upsertPost(await requireStaff(req, ["ops", "admin"]), data));
+export const staffDeletePost = callable(DeleteSiteItem, async (req, data) => deletePost(await requireStaff(req, ["ops", "admin"]), data));
+export const staffUpsertJob = callable(UpsertJob, async (req, data) => upsertJob(await requireStaff(req, ["ops", "admin"]), data));
+export const staffDeleteJob = callable(DeleteSiteItem, async (req, data) => deleteJob(await requireStaff(req, ["ops", "admin"]), data));
+export const staffSetApplication = callable(SetApplication, async (req, data) => setApplication(await requireStaff(req, ["ops", "admin"]), data));
 
 /** Sponsors (sponsors.ts): who they are, funding their budget from a deposit, what they buy. */
 export const staffUpsertSponsor = callable(UpsertSponsor, async (req, data) => upsertSponsor(await requireStaff(req, ["ops", "admin"]), data));

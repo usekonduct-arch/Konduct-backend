@@ -21,7 +21,20 @@ export async function mergeClaims(uid: string, patch: Record<string, unknown>) {
   await auth.setCustomUserClaims(uid, { ...current, ...patch });
 }
 
+/**
+ * The legal documents' version (konduct-landing/src/content/legal.ts) the person agreed to on the
+ * sign-up screen. Optional in the schema so an older app gets a clear "update" message instead of
+ * a bare validation error; the sign-up itself refuses to go ahead without it.
+ */
+export const LegalVersion = z.string().regex(/^d{4}-d{2}-d{2}$/).optional();
+
+function requireConsent(version: string | undefined) {
+  if (!version) fail("failed-precondition", "update_app", "Update Konduct to finish signing up: you need to agree to the new Terms and Privacy Policy.");
+  return { version, acceptedAtMs: Date.now() };
+}
+
 export const RegisterRider = z.strictObject({
+  legalVersion: LegalVersion,
   fullName: z
     .string()
     .max(120)
@@ -42,6 +55,7 @@ export async function registerRider(uid: string, email: string, existingRole: un
   if (existingRole) fail("failed-precondition", "already_registered", "This number already has a Konduct account.");
   await rateLimit(uid, "register", 5, 3_600_000);
   const { fullName, studentId } = input;
+  const legal = requireConsent(input.legalVersion);
   const idRef = db.doc(`studentIds/${studentIdKey(CAMPUS_ID, studentId)}`);
   const userRef = db.doc(`users/${uid}`);
 
@@ -72,6 +86,7 @@ export async function registerRider(uid: string, email: string, existingRole: un
       fundingCode: code,
       trustedDevices: [],
       allowOthersToPay: true,
+      legal,
       ...stamp(),
     });
     openAccountWrite(tx, riderAccount(uid), "rider", uid);
@@ -93,9 +108,10 @@ export async function registerRider(uid: string, email: string, existingRole: un
  * give the one-time code the agent handed over. Five wrong codes lock the invite until an agent
  * issues a new code. With no invite this returns { invited: false } and changes nothing.
  */
-export async function claimDriverAccount(uid: string, email: string, existingRole: unknown, rawCode: string) {
+export async function claimDriverAccount(uid: string, email: string, existingRole: unknown, rawCode: string, legalVersion?: string) {
   if (existingRole && existingRole !== "driver") fail("failed-precondition", "wrong_role", "This is a student account.");
   await rateLimit(uid, "claim", 10, 3_600_000);
+  const legal = requireConsent(legalVersion);
   const code = rawCode.toUpperCase().replace(/[^0-9A-Z]/g, "");
   if (!/^[0-9A-Z]{8}$/.test(code)) fail("invalid-argument", "bad_code", "Driver codes are 8 letters and numbers.");
   const inviteRef = db.doc(`driverInvites/${emailKey(email)}`);
@@ -133,6 +149,7 @@ export async function claimDriverAccount(uid: string, email: string, existingRol
       pinSet: false,
       trustedDevices: [],
       payoutAccountId: null,
+      legal,
       ...stamp(),
     });
     openAccountWrite(tx, driverAccount(uid), "driver", uid);

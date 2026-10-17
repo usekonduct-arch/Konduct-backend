@@ -248,3 +248,66 @@ describe("app versions, referrals and park watches", () => {
     await assertFails(setDoc(doc(as("bob", { role: "rider" }), "parkWatches/shasha__bob"), { uid: "bob", parkId: "shasha", expiresAtMs: 9e12 }));
   });
 });
+
+describe("website blog and careers", () => {
+  const app = (over: Record<string, unknown> = {}) => ({
+    jobId: "job_open1", jobTitle: "Campus ambassador", name: "Ada Obi", email: "ada@example.com", phone: "08030000000",
+    link: "https://example.com/ada-cv.pdf", note: "I ride every day.", consent: true, status: "new", source: "careers", createdAt: serverTimestamp(), ...over,
+  });
+  const staff = (uid: string, role: string) => as(uid, { role, staff: true, firebase: { sign_in_provider: "password", sign_in_second_factor: "totp" } });
+
+  before(async () => {
+    await env.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      await setDoc(doc(db, "posts/p_live"), { slug: "hello", status: "published" });
+      await setDoc(doc(db, "posts/p_draft"), { slug: "secret", status: "draft" });
+      await setDoc(doc(db, "jobs/job_open1"), { slug: "ambassador", status: "open" });
+      await setDoc(doc(db, "jobs/job_shut1"), { slug: "old-role", status: "closed" });
+      await setDoc(doc(db, "jobs/job_draft"), { slug: "next-role", status: "draft" });
+      await setDoc(doc(db, "users/olu"), { role: "ops", status: "active" });
+    });
+  });
+
+  test("anyone reads published posts and public jobs, never drafts", async () => {
+    const anon = env.unauthenticatedContext().firestore();
+    await assertSucceeds(getDoc(doc(anon, "posts/p_live")));
+    await assertSucceeds(getDocs(query(collection(anon, "posts"), where("status", "==", "published"))));
+    await assertFails(getDoc(doc(anon, "posts/p_draft")));
+    await assertFails(getDocs(collection(anon, "posts")));
+    await assertSucceeds(getDoc(doc(anon, "jobs/job_shut1")));
+    await assertSucceeds(getDocs(query(collection(anon, "jobs"), where("status", "in", ["open", "closed"]))));
+    await assertFails(getDoc(doc(anon, "jobs/job_draft")));
+    await assertFails(setDoc(doc(anon, "posts/p_new"), { slug: "spam", status: "published" }));
+    await assertFails(updateDoc(doc(as("alice", { role: "rider" }), "jobs/job_open1"), { status: "closed" }));
+  });
+
+  test("site editors see drafts; support staff don't", async () => {
+    await assertSucceeds(getDoc(doc(staff("olu", "ops"), "posts/p_draft")));
+    await assertFails(getDoc(doc(staff("sam", "support"), "posts/p_draft")));
+  });
+
+  test("anyone can apply to an open role with a well-formed application", async () => {
+    const anon = env.unauthenticatedContext().firestore();
+    await assertSucceeds(setDoc(doc(anon, "applications/a1"), app()));
+  });
+
+  test("applications to closed or missing roles, or odd shapes, are refused", async () => {
+    const anon = env.unauthenticatedContext().firestore();
+    await assertFails(setDoc(doc(anon, "applications/b1"), app({ jobId: "job_shut1" })));
+    await assertFails(setDoc(doc(anon, "applications/b2"), app({ jobId: "job_draft" })));
+    await assertFails(setDoc(doc(anon, "applications/b3"), app({ jobId: "nope_nope" })));
+    await assertFails(setDoc(doc(anon, "applications/b4"), app({ status: "hired" })));
+    await assertFails(setDoc(doc(anon, "applications/b5"), app({ consent: false })));
+    await assertFails(setDoc(doc(anon, "applications/b6"), app({ link: "http://insecure.example.com" })));
+    await assertFails(setDoc(doc(anon, "applications/b7"), app({ email: "not an email" })));
+    await assertFails(setDoc(doc(anon, "applications/b8"), app({ extra: 1 })));
+  });
+
+  test("only admin and ops read applications; nobody edits them from a browser", async () => {
+    await env.withSecurityRulesDisabled((ctx) => setDoc(doc(ctx.firestore(), "applications/c1"), { ...app(), createdAt: new Date() }));
+    await assertFails(getDoc(doc(env.unauthenticatedContext().firestore(), "applications/c1")));
+    await assertFails(getDoc(doc(staff("sam", "support"), "applications/c1")));
+    await assertSucceeds(getDoc(doc(staff("olu", "ops"), "applications/c1")));
+    await assertFails(updateDoc(doc(staff("olu", "ops"), "applications/c1"), { status: "hired" }));
+  });
+});

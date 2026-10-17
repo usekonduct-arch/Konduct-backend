@@ -230,6 +230,39 @@ service cloud.firestore {
         && request.resource.data.createdAt == request.time;
     }
 
+    // The website's blog and careers (konduct-backend/functions/src/domain/site.ts writes them).
+    // Anyone may read a published post or a public job; drafts are for staff who edit the site.
+    function siteEditor() {
+      return staffReader() && request.auth.token.role in ['admin', 'ops'];
+    }
+    match /posts/{id} {
+      allow read: if resource.data.status == 'published' || siteEditor();
+    }
+    match /jobs/{id} {
+      allow read: if resource.data.status in ['open', 'closed'] || siteEditor();
+    }
+
+    // Job applications from the careers page (konduct-landing/src/lib/cms.ts). Anyone may send one
+    // well-formed application for an open role; only admin and ops can read them.
+    match /applications/{id} {
+      allow read: if siteEditor();
+      allow create: if request.resource.data.keys().hasOnly(['jobId', 'jobTitle', 'name', 'email', 'phone', 'link', 'note', 'consent', 'status', 'source', 'createdAt'])
+        && request.resource.data.keys().hasAll(['jobId', 'jobTitle', 'name', 'email', 'phone', 'link', 'note', 'consent', 'status', 'source', 'createdAt'])
+        && request.resource.data.jobId is string
+        && request.resource.data.jobId.matches('^[A-Za-z0-9_-]{6,40}$')
+        && get(/databases/$(database)/documents/jobs/$(request.resource.data.jobId)).data.status == 'open'
+        && request.resource.data.jobTitle is string && request.resource.data.jobTitle.size() <= 100
+        && request.resource.data.name is string && request.resource.data.name.size() >= 3 && request.resource.data.name.size() <= 80
+        && request.resource.data.email is string && request.resource.data.email.matches('^[^@ ]+@[^@ ]+[.][^@ ]+$') && request.resource.data.email.size() <= 120
+        && request.resource.data.phone is string && request.resource.data.phone.size() <= 30
+        && request.resource.data.link is string && request.resource.data.link.matches('^https://.+') && request.resource.data.link.size() <= 500
+        && request.resource.data.note is string && request.resource.data.note.size() <= 3000
+        && request.resource.data.consent == true
+        && request.resource.data.status == 'new'
+        && request.resource.data.source == 'careers'
+        && request.resource.data.createdAt == request.time;
+    }
+
     // Everything else (pins, studentIds, fundingCodes, payerAccounts, payQuotes, idempotency,
     // rateLimits, dailyTotals, connectAccounts, devices, referralCodes, referrals, ...) has no rule and is denied.
   }

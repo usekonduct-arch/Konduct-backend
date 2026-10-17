@@ -112,9 +112,9 @@ export async function issueVehicleQr(actor: Actor, vehicleId: string) {
     const shortCode = randomCode(6);
     tx.update(ref, { tokenVersion: version, tokenIssuedAt: new Date(), shortCode, ...touched() });
     audit({ actor: actor.uid, action: "vehicle.qr.issue", target: ref.path, before: { tokenVersion: version - 1 }, after: { tokenVersion: version }, ip: actor.ip }, tx);
-    return { version, shortCode, plate: v.get("plate") as string };
+    return { version, shortCode, plate: v.get("plate") as string, type: v.get("type") as "shuttle" | "bike" | undefined };
   });
-  return { token: makeVehicleToken(QR_SIGNING_KEY.value(), vehicleId, out.version), shortCode: out.shortCode, plate: out.plate };
+  return { token: makeVehicleToken(QR_SIGNING_KEY.value(), vehicleId, out.version), shortCode: out.shortCode, plate: out.plate, type: out.type };
 }
 
 export async function setVehicleStatus(actor: Actor, vehicleId: string, status: "active" | "suspended" | "retired") {

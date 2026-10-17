@@ -34,5 +34,10 @@ services:
         sync: false
       - key: BACHS_WEBHOOK_SECRETS
         sync: false
+      # Optional: a Vercel deploy hook for the website. Publishing a blog post or job rebuilds the
+      # static site (sitemap, Google for Jobs) within minutes. Without it, new content still shows
+      # on the site but search engines see it after the next deploy.
+      - key: SITE_DEPLOY_HOOK
+        sync: false
       - key: JOBS_SECRET
         generateValue: true

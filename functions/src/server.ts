@@ -114,10 +114,11 @@ function sendError(res: Response, e: HttpsError) {
   res.status(e.httpErrorCode.status).json({ error: e.toJSON() });
 }
 
-// Callables carry small JSON; only an image upload needs room (the console keeps images under 700 KB).
+// Callables carry small JSON; only an image upload or a long blog post needs room (the console keeps images under 700 KB).
 const smallJson = express.json({ limit: "64kb", verify: keepRaw });
 const bigJson = express.json({ limit: "1mb", verify: keepRaw });
-const bodyFor = (req: express.Request, res: Response, next: NextFunction) => (req.params.name === "staffUploadMedia" ? bigJson : smallJson)(req, res, next);
+const BIG = new Set(["staffUploadMedia", "staffUpsertPost", "staffUpsertJob"]);
+const bodyFor = (req: express.Request, res: Response, next: NextFunction) => (BIG.has(String(req.params.name)) ? bigJson : smallJson)(req, res, next);
 
 app.post("/:name", bodyFor, async (req, res) => {
   const fn = callables.get(String(req.params.name));

@@ -765,7 +765,7 @@ describe("driver onboarding by email + agent code", () => {
     const stored = (await db.collection("driverInvites").where("email", "==", email).get()).docs[0].data();
     assert.ok(!JSON.stringify(stored).includes(onboardingCode), "only a keyed hash is stored");
     const uid = await newUser(email);
-    const out = await claimDriverAccount(uid, email, undefined, onboardingCode.toLowerCase());
+    const out = await claimDriverAccount(uid, email, undefined, onboardingCode.toLowerCase(), "2026-10-17");
     assert.equal(out.invited, true);
     assert.equal((await db.doc(`users/${uid}`).get()).get("role"), "driver");
     assert.equal((await db.doc(`vehicles/${vehicleId}`).get()).get("driverUid"), uid);
@@ -777,31 +777,31 @@ describe("driver onboarding by email + agent code", () => {
     const { onboardingCode } = await invite(email);
     const uid = await newUser(email);
     for (let left = 4; left >= 1; left--) {
-      const r = await claimDriverAccount(uid, email, undefined, "AAAAAAAA").catch((e) => e);
+      const r = await claimDriverAccount(uid, email, undefined, "AAAAAAAA", "2026-10-17").catch((e) => e);
       assert.equal((r.details as { reason: string }).reason, "code_wrong");
       assert.equal((r.details as { attemptsLeft: number }).attemptsLeft, left);
     }
-    assert.equal(await reason(claimDriverAccount(uid, email, undefined, "AAAAAAAA")), "invite_locked");
-    assert.equal(await reason(claimDriverAccount(uid, email, undefined, onboardingCode)), "invite_locked"); // even the right one
+    assert.equal(await reason(claimDriverAccount(uid, email, undefined, "AAAAAAAA", "2026-10-17")), "invite_locked");
+    assert.equal(await reason(claimDriverAccount(uid, email, undefined, onboardingCode, "2026-10-17")), "invite_locked"); // even the right one
     const fresh = await resetDriverCode(agent(), email);
     assert.notEqual(fresh.onboardingCode, onboardingCode);
-    assert.equal(await reason(claimDriverAccount(uid, email, undefined, onboardingCode)), "code_wrong"); // the old code is dead
-    assert.equal((await claimDriverAccount(uid, email, undefined, fresh.onboardingCode)).invited, true);
+    assert.equal(await reason(claimDriverAccount(uid, email, undefined, onboardingCode, "2026-10-17")), "code_wrong"); // the old code is dead
+    assert.equal((await claimDriverAccount(uid, email, undefined, fresh.onboardingCode, "2026-10-17")).invited, true);
   });
 
   test("a claimed invite can't be taken over by another account", async () => {
     const email = `${uniq("tunde").toLowerCase()}@gmail.com`;
     const { onboardingCode } = await invite(email);
     const owner = await newUser(email);
-    await claimDriverAccount(owner, email, undefined, onboardingCode);
+    await claimDriverAccount(owner, email, undefined, onboardingCode, "2026-10-17");
     const intruder = uniq("usr"); // e.g. the same email re-registered after the owner's account was deleted
-    assert.equal(await reason(claimDriverAccount(intruder, email, undefined, onboardingCode)), "invite_claimed");
+    assert.equal(await reason(claimDriverAccount(intruder, email, undefined, onboardingCode, "2026-10-17")), "invite_claimed");
     assert.equal(await reason(resetDriverCode(agent(), email)), "invite_claimed");
   });
 
   test("an email no agent registered changes nothing", async () => {
     const uid = await newUser(`${uniq("nobody").toLowerCase()}@gmail.com`);
-    const out = await claimDriverAccount(uid, "nobody-here@gmail.com", undefined, "KD7F3Q2X");
+    const out = await claimDriverAccount(uid, "nobody-here@gmail.com", undefined, "KD7F3Q2X", "2026-10-17");
     assert.deepEqual(out, { invited: false });
     assert.equal((await db.doc(`users/${uid}`).get()).exists, false);
   });
@@ -809,7 +809,7 @@ describe("driver onboarding by email + agent code", () => {
   test("a student account can't claim a driver invite", async () => {
     const email = `${uniq("tunde").toLowerCase()}@gmail.com`;
     const { onboardingCode } = await invite(email);
-    assert.equal(await reason(claimDriverAccount(uniq("usr"), email, "rider", onboardingCode)), "wrong_role");
+    assert.equal(await reason(claimDriverAccount(uniq("usr"), email, "rider", onboardingCode, "2026-10-17")), "wrong_role");
   });
 
   test("members must sign in with email + password", () => {
