@@ -176,12 +176,21 @@ app.use((err: Error & { status?: number }, _req: express.Request, res: Response,
 });
 
 const port = Number(process.env.PORT ?? 8080);
-app.listen(port, () => {
+
+/** Gives up waiting on a startup job, so a stalled Firestore call shows in the log instead of hanging silently. */
+const within = <T>(ms: number, work: Promise<T>) =>
+  Promise.race([work, new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`no answer after ${ms / 1000}s`)), ms).unref())]);
+
+// Render needs the server on 0.0.0.0: Node's default (the IPv6 wildcard) can be missed by its port scan.
+app.listen(port, "0.0.0.0", () => {
   logger.info("konduct backend listening", { port, callables: callables.size, appCheck: ENFORCE_APP_CHECK });
-  // Bring the riders' bus board up to date with anything that changed while the server was down.
-  rebuildBoard()
-    .then((r) => logger.info("bus board rebuilt", r))
-    .catch((e) => logger.error("bus board rebuild failed", { err: (e as Error).message }));
-  // Once: drivers' daily figures for fares paid before they were kept.
-  backfillDriverDays().catch((e) => logger.error("driver days backfill failed", { err: (e as Error).message }));
+  // Startup catch-up runs a moment later, so it never competes with the platform's first health checks.
+  setTimeout(() => {
+    // Bring the riders' bus board up to date with anything that changed while the server was down.
+    within(120_000, rebuildBoard())
+      .then((r) => logger.info("bus board rebuilt", r))
+      .catch((e) => logger.error("bus board rebuild failed", { err: (e as Error).message }));
+    // Once: drivers' daily figures for fares paid before they were kept.
+    within(300_000, backfillDriverDays()).catch((e) => logger.error("driver days backfill failed", { err: (e as Error).message }));
+  }, 5_000).unref();
 });
