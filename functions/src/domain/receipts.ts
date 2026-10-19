@@ -66,6 +66,7 @@ export async function receiptProof(actor: Actor, input: z.infer<typeof ReceiptPr
 
 const TYPE_LABEL: Record<string, string> = {
   fare: "Ride fare",
+  "fare.cash": "Ride fare, paid in cash at the park",
   topup: "Wallet top-up",
   deposit: "Bank deposit",
   "payout.reserve": "Withdrawal to bank",

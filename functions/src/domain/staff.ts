@@ -263,8 +263,14 @@ export const RequestAdjustment = z.strictObject({ account: z.string().regex(/^[A
 export const requestAdjustment = (actor: Actor, p: z.infer<typeof RequestAdjustment>) =>
   requestApproval({ kind: "ledger_adjustment", makerUid: actor.uid, target: `wallets/${p.account}`, summary: `${p.side} ${p.amountKobo} kobo: ${p.memo}`, payload: p });
 
-export const requestDepositAssign = (actor: Actor, depositId: string, uid: string) =>
-  requestApproval({ kind: "deposit_assign", makerUid: actor.uid, target: `deposits/${depositId}`, summary: `Assign deposit to ${uid}`, payload: { depositId, uid } });
+export const requestDepositAssign = (actor: Actor, depositId: string, uid: string, to: "rider" | "cash" = "rider") =>
+  requestApproval({
+    kind: "deposit_assign",
+    makerUid: actor.uid,
+    target: `deposits/${depositId}`,
+    summary: to === "cash" ? `Count deposit as cash banked by ${uid}` : `Assign deposit to ${uid}`,
+    payload: { depositId, uid, to },
+  });
 
 export const requestKycTier = (actor: Actor, uid: string, tier: number) =>
   requestApproval({ kind: "kyc_tier", makerUid: actor.uid, target: `users/${uid}`, summary: `Set KYC tier ${tier}`, payload: { uid, tier } });

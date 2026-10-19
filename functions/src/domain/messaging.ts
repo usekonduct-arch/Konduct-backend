@@ -200,6 +200,8 @@ export async function handleMediaRequest(req: Request, res: Response) {
     const body = Buffer.isBuffer(bytes) ? bytes : Buffer.from((bytes as { toUint8Array: () => Uint8Array }).toUint8Array());
     res.set("Cache-Control", "public, max-age=31536000, immutable");
     res.set("X-Content-Type-Options", "nosniff");
+    // Public images; the web app draws them on a canvas, which needs CORS.
+    res.set("Access-Control-Allow-Origin", "*");
     res.status(200).type(snap.get("contentType") as string).send(body);
   } catch {
     res.status(500).send("error");

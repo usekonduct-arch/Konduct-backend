@@ -18,6 +18,9 @@ services:
       # The staff console's address(es), comma-separated; browsers elsewhere can't call the API.
       - key: CONSOLE_ORIGINS
         value: https://konduct-console.vercel.app
+      # The student web app (konduct_student built for web), comma-separated.
+      - key: WEB_APP_ORIGINS
+        value: https://app.konduct.com.ng
       - key: TOPUP_RETURN_URL
         value: https://konduct.com.ng/topup/done
       - key: DRIVER_CONTACT_EMAIL

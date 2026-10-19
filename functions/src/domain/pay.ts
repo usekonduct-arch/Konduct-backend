@@ -43,7 +43,7 @@ export const PreviewInput = z.strictObject({
   passengers: z.number().int().min(1).max(RULES.maxPassengers).default(1),
 });
 
-async function vehicleFrom(input: z.infer<typeof PreviewInput>) {
+export async function vehicleFrom(input: z.infer<typeof PreviewInput>) {
   if (input.qr) {
     const t = readVehicleToken(QR_SIGNING_KEY.value(), input.qr);
     if (!t) fail("invalid-argument", "bad_code", "That isn't a Konduct code. Check the sticker and try again.");

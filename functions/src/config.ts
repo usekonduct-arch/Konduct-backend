@@ -107,6 +107,8 @@ export const RULES = {
   maxParkWatches: 3,
   /** A rider can enter a friend's referral code this long after signing up, before their first ride. */
   referralApplyWindowMs: 14 * 86_400_000,
+  /** Most cash one staff member can hold from cash rides before handing it in (cashrides.ts). */
+  maxCashHeldKobo: 2_000_000, // ₦20,000
   /** Highest reward an admin can set for either side of a referral. */
   maxReferralBonusKobo: 200_000, // ₦2,000
 } as const;

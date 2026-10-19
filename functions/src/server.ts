@@ -65,11 +65,13 @@ const keepRaw = (req: express.Request, _res: Response, buf: Buffer) => {
 app.get("/healthz", (_req, res) => void res.status(200).send("ok"));
 
 /**
- * The staff console is a website, so browsers need CORS. Only origins in CONSOLE_ORIGINS (comma-separated,
- * for example https://konduct-console.vercel.app) may call from a page; the apps don't send an Origin.
+ * The staff console and the student web app are websites, so browsers need CORS. Only origins in
+ * CONSOLE_ORIGINS and WEB_APP_ORIGINS (comma-separated, for example https://konduct-console.vercel.app)
+ * may call from a page; the phone apps don't send an Origin. Every callable still checks the caller's role.
  */
 const consoleOrigins = new Set(
-  (process.env.CONSOLE_ORIGINS ?? "http://localhost:5190")
+  [process.env.CONSOLE_ORIGINS ?? "http://localhost:5190", process.env.WEB_APP_ORIGINS ?? ""]
+    .join(",")
     .split(",")
     .map((o) => o.trim().replace(/\/$/, ""))
     .filter(Boolean),

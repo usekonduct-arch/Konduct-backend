@@ -12,7 +12,8 @@
  *  Staff     staff* (MFA + role checked): onboarding, staff accounts (staffAddStaff, staffRevokeStaff, ...), editing people, QR, routes, parks, landmarks, trip routes, bus seats, support, people, switches,
  *            approvals, disputes, notifications (staffSendNotice, staffSetBroadcast), ads (staffUpsertAd, staffDeleteAd),
  *            images (staffUploadMedia), website blog and careers (staffUpsertPost, staffDeletePost, staffUpsertJob, staffDeleteJob, staffSetApplication), app versions (staffSetAppVersions), referral rewards (staffSetReferrals),
- *            sponsors (staffUpsertSponsor, staffFundSponsor, staffUpsertRideCampaign, staffSetWrappedSponsor)
+ *            sponsors (staffUpsertSponsor, staffFundSponsor, staffUpsertRideCampaign, staffSetWrappedSponsor),
+ *            cash rides for visitors without the app (staffCashRidePreview, staffCashRideConfirm, staffMyCash, staffReceiveCash)
  *  Both      trackAds (ad views, taps and shares for sponsors' reports)
  *  Bachs     bachsWebhook (HTTP, signature-verified)
  *  Public    receipt (HTTP GET /receipt/<code>: anyone with a receipt's QR can check it is genuine),
@@ -38,6 +39,7 @@ import { handleReceiptPage, receiptProof, ReceiptProofInput } from "./domain/rec
 import { DeleteAd, deleteAd, handleMediaRequest, joinTopic, SendNotice, sendNotice, SetBroadcast, setBroadcastActive, UploadMedia, uploadMedia, UpsertAd, upsertAd } from "./domain/messaging";
 import { ConfirmInput, confirmOfflineCode, confirmPayment, previewPayment, PreviewInput } from "./domain/pay";
 import { SetParkBuses, setParkBuses, UpsertPark, upsertPark } from "./domain/parks";
+import { CashRideConfirm, confirmCashRide, CashRidePreview, myCash, previewCashRide, ReceiveCash, receiveCash } from "./domain/cashrides";
 import { DriverSetRoute, setVehicleRoute, StaffSetRoute, UpsertLandmark, upsertLandmark } from "./domain/landmarks";
 import { RateDriver, rateDriver, ratingFeedback } from "./domain/ratings";
 import { isLang, LANGS } from "./domain/i18n";
@@ -106,7 +108,7 @@ const registerDevice_ = callable(
   z.strictObject({
     deviceId: z.string().regex(/^[A-Za-z0-9_-]{8,64}$/),
     fcmToken: z.string().min(20).max(4096),
-    platform: z.enum(["android", "ios"]),
+    platform: z.enum(["android", "ios", "web"]),
     // Older app builds don't send it.
     lang: z.enum(LANGS).optional(),
   }),
@@ -266,6 +268,16 @@ export const staffSetVehicleRoute = callable(StaffSetRoute, async (req, data) =>
 });
 
 /** Staff at the park check a bus in or out for its driver. */
+/** Cash rides: a park agent (or ops/admin) takes a visitor's cash and pays the bus for them. */
+export const staffCashRidePreview = callable(CashRidePreview, async (req, data) => previewCashRide(await requireStaff(req, ["agent", "ops", "admin"]), data), { secrets: [QR_SIGNING_KEY] });
+
+export const staffCashRideConfirm = callable(CashRideConfirm, async (req, data) => confirmCashRide(await requireStaff(req, ["agent", "ops", "admin"]), data));
+
+export const staffMyCash = callable(Empty, async (req) => myCash(await requireStaff(req, ["agent", "ops", "admin"])));
+
+/** Ops or admin took cash from an agent in person. */
+export const staffReceiveCash = callable(ReceiveCash, async (req, data) => receiveCash(await requireStaff(req, ["ops", "admin"]), data));
+
 export const staffSetVehiclePark = callable(StaffSetPark, async (req, data) =>
   setVehiclePark(await requireStaff(req, ["agent", "marshal", "ops", "admin"]), data.vehicleId, data.parkId),
 );
@@ -288,8 +300,9 @@ export const staffSetSwitches = callable(SetSwitches, async (req, data) => setSw
 
 export const staffRequestAdjustment = callable(RequestAdjustment, async (req, data) => requestAdjustment(await requireStaff(req, ["ops", "admin"]), data));
 
-export const staffAssignDeposit = callable(z.strictObject({ depositId: idField, uid: uidField }), async (req, data) =>
-  requestDepositAssign(await requireStaff(req, ["ops", "admin", "support"]), data.depositId, data.uid),
+/** to "cash": the deposit is a staff member banking the cash they collected from cash rides (cashrides.ts). */
+export const staffAssignDeposit = callable(z.strictObject({ depositId: idField, uid: uidField, to: z.enum(["rider", "cash"]).default("rider") }), async (req, data) =>
+  requestDepositAssign(await requireStaff(req, ["ops", "admin", "support"]), data.depositId, data.uid, data.to),
 );
 
 export const staffSetKycTier = callable(z.strictObject({ uid: uidField, tier: z.number().int().min(1).max(2) }), async (req, data) =>

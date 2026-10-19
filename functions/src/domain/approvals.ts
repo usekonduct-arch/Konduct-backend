@@ -12,7 +12,8 @@ import { audit } from "../lib/audit";
 import { auth, db, FieldValue, stamp, touched } from "../lib/db";
 import { fail } from "../lib/errors";
 import { type Actor, STAFF_ROLES, type StaffRole } from "../lib/guards";
-import { PLATFORM, prepare, riderAccount, type Side, sponsorAccount } from "../ledger/ledger";
+import { naira } from "../lib/money";
+import { agentAccount, InsufficientFunds, PLATFORM, prepare, riderAccount, type Side, sponsorAccount } from "../ledger/ledger";
 import { mergeClaims } from "./accounts";
 import { switchesRef } from "./policy";
 
@@ -97,23 +98,31 @@ async function execute(kind: ApprovalKind, payload: Record<string, unknown>, che
     case "deposit_assign": {
       const depositId = String(payload.depositId);
       const uid = String(payload.uid);
-      await db.runTransaction(async (tx) => {
-        const [dep, user] = await tx.getAll(db.doc(`deposits/${depositId}`), db.doc(`users/${uid}`));
-        if (dep.get("status") !== "unmatched") fail("failed-precondition", "not_unmatched", "This deposit is already assigned.");
-        if (user.get("role") !== "rider") fail("failed-precondition", "not_rider", "Deposits can only go to a rider wallet.");
-        const amountKobo = dep.get("amountKobo") as number;
-        const ledger = await prepare(tx, {
-          txId: `assign_${depositId}`,
-          type: "deposit.assign",
-          legs: [
-            { account: PLATFORM.suspense, side: "debit", amountKobo },
-            { account: riderAccount(uid), side: "credit", amountKobo },
-          ],
-          refs: { depositId, approvalId },
+      // "cash": a staff member banked cash from cash rides; it clears what they owe (cashrides.ts).
+      const cash = payload.to === "cash";
+      try {
+        await db.runTransaction(async (tx) => {
+          const [dep, user] = await tx.getAll(db.doc(`deposits/${depositId}`), db.doc(`users/${uid}`));
+          if (dep.get("status") !== "unmatched") fail("failed-precondition", "not_unmatched", "This deposit is already assigned.");
+          if (!cash && user.get("role") !== "rider") fail("failed-precondition", "not_rider", "Deposits can only go to a rider wallet.");
+          const amountKobo = dep.get("amountKobo") as number;
+          const ledger = await prepare(tx, {
+            txId: `assign_${depositId}`,
+            type: cash ? "cash.banked" : "deposit.assign",
+            legs: [
+              { account: PLATFORM.suspense, side: "debit", amountKobo },
+              { account: cash ? agentAccount(uid) : riderAccount(uid), side: "credit", amountKobo },
+            ],
+            refs: { depositId, approvalId },
+          });
+          ledger.commit();
+          tx.update(dep.ref, { status: "credited", uid, matchedBy: cash ? "staff_cash" : "staff", ...touched() });
         });
-        ledger.commit();
-        tx.update(dep.ref, { status: "credited", uid, matchedBy: "staff", ...touched() });
-      });
+      } catch (e) {
+        if (e instanceof InsufficientFunds) fail("failed-precondition", "more_than_held", `This deposit is more than the ${naira(e.balanceKobo)} they're holding.`);
+        if (e instanceof Error && /is not open/.test(e.message)) fail("failed-precondition", "no_cash", "That person hasn't collected any cash.");
+        throw e;
+      }
       return { assigned: uid };
     }
     case "sponsor_fund": {

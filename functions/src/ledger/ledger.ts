@@ -46,6 +46,10 @@ const PLATFORM_NORMAL: Record<string, Side> = {
 
 export const riderAccount = (uid: string) => `rider_${uid}`;
 export const driverAccount = (uid: string) => `driver_${uid}`;
+/**
+ * Cash a staff member collected at a park for rides they sold (cashrides.ts) and hasn't handed in
+ * yet. Debit-normal: the balance is what they owe Konduct, and handing cash in brings it down.
+ */
 export const agentAccount = (uid: string) => `agent_${uid}`;
 /** A sponsor's prepaid budget (sponsors.ts): money Konduct holds for them, spent on the rides they cover. */
 export const sponsorAccount = (sponsorId: string) => `sponsor_${sponsorId}`;
@@ -70,6 +74,17 @@ export function openAccountWrite(tx: Transaction, accountId: string, kind: Exclu
     { kind, ownerUid, normal: "credit", balanceKobo: 0, seq: 0, lastHash: GENESIS, currency: "NGN", ...stamp() },
     { merge: false },
   );
+}
+
+/** Opens a staff member's cash account (agentAccount) if it isn't open yet. Never resets one. */
+export async function openAgentAccount(uid: string) {
+  const ref = db.doc(`wallets/${agentAccount(uid)}`);
+  if ((await ref.get()).exists) return;
+  try {
+    await ref.create({ kind: "agent", ownerUid: uid, normal: "debit", balanceKobo: 0, seq: 0, lastHash: GENESIS, currency: "NGN", ...stamp() });
+  } catch (e) {
+    if ((e as { code?: number }).code !== 6) throw e; // ALREADY_EXISTS: opened in parallel
+  }
 }
 
 export type Prepared = {
