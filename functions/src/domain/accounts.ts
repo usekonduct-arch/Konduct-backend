@@ -26,7 +26,7 @@ export async function mergeClaims(uid: string, patch: Record<string, unknown>) {
  * sign-up screen. Optional in the schema so an older app gets a clear "update" message instead of
  * a bare validation error; the sign-up itself refuses to go ahead without it.
  */
-export const LegalVersion = z.string().regex(/^d{4}-d{2}-d{2}$/).optional();
+export const LegalVersion = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional();
 
 function requireConsent(version: string | undefined) {
   if (!version) fail("failed-precondition", "update_app", "Update Konduct to finish signing up: you need to agree to the new Terms and Privacy Policy.");
@@ -44,11 +44,13 @@ export const RegisterRider = z.strictObject({
     .string()
     .max(40)
     .transform(normalizeStudentId)
-    .pipe(z.string().min(4, "Enter your student ID.").max(24, "That student ID is too long.").regex(/^[A-Z0-9-]+$/, "Student IDs use letters, numbers and slashes only.")),
+    .pipe(z.string().min(4, "Enter your student ID.").max(24, "That student ID is too long.").regex(/^[A-Z0-9-]+$/, "Student IDs use letters, numbers and slashes only."))
+    .optional(),
 });
 
 /**
- * FR-AUTH-01/02: profile + wallet + a claim on the student ID, in one transaction. A clash is
+ * FR-AUTH-01/02: profile + wallet (+ a claim on the student ID when one is given), in one
+ * transaction. The app now asks only for a name; staff can add a student ID later. A clash is
  * refused and flagged for review rather than silently merged.
  */
 export async function registerRider(uid: string, email: string, existingRole: unknown, input: z.infer<typeof RegisterRider>) {
@@ -56,13 +58,14 @@ export async function registerRider(uid: string, email: string, existingRole: un
   await rateLimit(uid, "register", 5, 3_600_000);
   const { fullName, studentId } = input;
   const legal = requireConsent(input.legalVersion);
-  const idRef = db.doc(`studentIds/${studentIdKey(CAMPUS_ID, studentId)}`);
+  const idRef = studentId ? db.doc(`studentIds/${studentIdKey(CAMPUS_ID, studentId)}`) : null;
   const userRef = db.doc(`users/${uid}`);
 
   const result = await db.runTransaction(async (tx) => {
-    const [held, existing] = await tx.getAll(idRef, userRef);
+    const existing = await tx.get(userRef);
     if (existing.exists) return { clash: null, code: existing.get("fundingCode") as string };
-    if (held.exists && held.get("uid") !== uid) return { clash: held.get("uid") as string, code: null };
+    const held = idRef ? await tx.get(idRef) : null;
+    if (held?.exists && held.get("uid") !== uid) return { clash: held.get("uid") as string, code: null };
 
     // A personal code riders put in their transfer narration so deposits find them.
     let code = "";
@@ -72,13 +75,13 @@ export async function registerRider(uid: string, email: string, existingRole: un
     }
     if (!code) throw new Error("could not allocate a funding code");
 
-    tx.set(idRef, { uid, studentId, ...stamp() });
+    if (idRef) tx.set(idRef, { uid, studentId, ...stamp() });
     tx.set(db.doc(`fundingCodes/${code}`), { uid, ...stamp() });
     tx.set(userRef, {
       role: "rider",
       status: "active",
       fullName,
-      studentId,
+      ...(studentId ? { studentId } : {}),
       email,
       emailMasked: maskEmail(email),
       kycTier: 1,
@@ -90,7 +93,7 @@ export async function registerRider(uid: string, email: string, existingRole: un
       ...stamp(),
     });
     openAccountWrite(tx, riderAccount(uid), "rider", uid);
-    audit({ actor: uid, action: "rider.register", target: userRef.path, after: { studentId } }, tx);
+    audit({ actor: uid, action: "rider.register", target: userRef.path, after: { studentId: studentId ?? null } }, tx);
     return { clash: null, code };
   });
 
