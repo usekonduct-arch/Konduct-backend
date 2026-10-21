@@ -434,20 +434,27 @@ describe("support chat", () => {
 });
 
 describe("funding via Bachs", () => {
+  // A checkout (and charge) id unique to each top-up. Reusing one static id across the suite let
+  // the checkout-id lookup in findTopUp match another test's top-up, which is what made the
+  // "matched by its checkout id" test flaky — it depends on that lookup and nothing else.
+  const checkoutOf = (topupId: string) => `chk_${topupId}`;
+  const chargeOf = (topupId: string) => `ch_${topupId}`;
+
   const paidCheckout = (topupId: string, amount = "2000.00", extra: Record<string, unknown> = {}) => ({
-    checkout_id: "chk_test123",
+    checkout_id: checkoutOf(topupId),
     status: "completed",
     payment_status: "paid",
     reference: topupId,
     amount,
     currency: "NGN",
     metadata: { topupId },
-    charge: { id: "ch_test123", amount, currency: "NGN", status: "succeeded", settlement_amount: (Number(amount) - 30).toFixed(2) },
+    charge: { id: chargeOf(topupId), amount, currency: "NGN", status: "succeeded", settlement_amount: (Number(amount) - 30).toFixed(2) },
     ...extra,
   });
 
   async function openTopUp(r: Awaited<ReturnType<typeof makeRider>>, amountKobo = 200_000) {
-    onBachs("POST", "/v1/checkout-sessions", () => ({ json: { checkout_id: "chk_test123", checkout_url: "https://checkout.bachs.io/c/x", status: "open" } }));
+    // The checkout id is derived from our reference (the top-up id), so each top-up gets its own.
+    onBachs("POST", "/v1/checkout-sessions", (body) => ({ json: { checkout_id: `chk_${body.reference}`, checkout_url: "https://checkout.bachs.io/c/x", status: "open" } }));
     const t = await createTopUp(r.actor, { amountKobo, idempotencyKey: keyOf() });
     const call = bachsCalls.find((c) => c.path === "/v1/checkout-sessions")!;
     assert.equal(call.body.pricing.amount, "2000.00");
@@ -461,7 +468,7 @@ describe("funding via Bachs", () => {
     id,
     type,
     organization_id: "acct_konduct",
-    data: { checkout_id: "chk_test123", reference: topupId, payment_status: "paid", status: "SUCCEEDED", amount: "2000.00", currency: "NGN" },
+    data: { checkout_id: checkoutOf(topupId), reference: topupId, payment_status: "paid", status: "SUCCEEDED", amount: "2000.00", currency: "NGN" },
   });
 
   test("a signed, API-confirmed top-up credits exactly once, whatever arrives and however often", async () => {
@@ -516,7 +523,7 @@ describe("funding via Bachs", () => {
     const t = await openTopUp(r);
     // Bachs only includes the reference "when available": neither the event nor the lookup has it.
     onBachs("GET", "/v1/checkout-sessions/", () => ({ json: { ...paidCheckout(t.topupId), reference: null, metadata: {} } }));
-    const e = webhook({ id: evtId(), type: "collection.succeeded", organization_id: "acct_konduct", data: { checkout_id: "chk_test123", charge_id: "ch_test123", status: "SUCCEEDED", amount: "2000.00", currency: "NGN" } });
+    const e = webhook({ id: evtId(), type: "collection.succeeded", organization_id: "acct_konduct", data: { checkout_id: checkoutOf(t.topupId), charge_id: chargeOf(t.topupId), status: "SUCCEEDED", amount: "2000.00", currency: "NGN" } });
     await handleBachsWebhook(e.req, e.res);
     assert.equal(e.res.code, 200);
     assert.equal(await balance(riderAccount(r.uid)), 200_000);
@@ -543,7 +550,7 @@ describe("funding via Bachs", () => {
   test("refreshTopUps marks a checkout Bachs has expired, and credits nothing", async () => {
     const r = await makeRider(0);
     const t = await openTopUp(r);
-    onBachs("GET", "/v1/checkout-sessions/", () => ({ json: { checkout_id: "chk_test123", status: "expired", payment_status: "unpaid", reference: t.topupId } }));
+    onBachs("GET", "/v1/checkout-sessions/", () => ({ json: { checkout_id: checkoutOf(t.topupId), status: "expired", payment_status: "unpaid", reference: t.topupId } }));
     assert.deepEqual(await refreshTopUps(r.actor), { checked: 1, credited: 0 });
     assert.equal((await db.doc(`topups/${t.topupId}`).get()).get("status"), "expired");
     assert.equal(await balance(riderAccount(r.uid)), 0);
@@ -866,14 +873,19 @@ describe("disputes and books", () => {
 describe("approvals and staff messages", () => {
   const admin = () => actorFor(uniq("adm"), "admin", { role: "admin", status: "active" });
 
-  test("an admin may approve their own request; ops still need a second person", async () => {
+  test("nobody may approve their own request — not even an admin — but a second admin can", async () => {
     const r = await makeRider(0);
     const a = admin();
     const own = await requestKycTier(a, r.uid, 2);
-    const done = await decide(a, own.approvalId, "approve");
+    // The maker can no longer approve their own request, whatever their role.
+    assert.equal(await reason(decide(a, own.approvalId, "approve")), "same_person");
+    assert.equal((await db.doc(`users/${r.uid}`).get()).get("kycTier") ?? 1, 1);
+
+    // A different admin signs it off, and only then does it take effect.
+    const a2 = admin();
+    const done = await decide(a2, own.approvalId, "approve");
     assert.equal(done.status, "approved");
     assert.equal((await db.doc(`users/${r.uid}`).get()).get("kycTier"), 2);
-    assert.equal((await db.doc(`approvals/${own.approvalId}`).get()).get("selfApproved"), true);
 
     const ops = actorFor(uniq("ops"), "ops", { role: "ops", status: "active" });
     const adj = await requestAdjustment(ops, { account: riderAccount(r.uid), side: "credit", amountKobo: 100, memo: "test credit" });

@@ -146,18 +146,19 @@ describe("cash rides at the park", () => {
   test("banked cash, matched to the agent from Deposits, clears what they owe", async () => {
     const d = await makeDriverWithVehicle(20_000);
     const a = agent();
-    const boss = admin();
+    const boss = admin();      // the maker: requests the assignment
+    const checker = admin();   // a second person approves it (no self-approval)
     await sell(a, d.vehicleId, 2); // owes ₦400
 
     const tooMuch = await unmatchedDeposit(50_000);
     const big = await requestDepositAssign(boss, tooMuch, a.uid, "cash");
-    assert.equal(await reason(decide(boss, big.approvalId, "approve")), "more_than_held");
+    assert.equal(await reason(decide(checker, big.approvalId, "approve")), "more_than_held");
     assert.equal((await db.doc(`deposits/${tooMuch}`).get()).get("status"), "unmatched");
 
     const suspenseBefore = await balance(PLATFORM.suspense);
     const right = await unmatchedDeposit(40_000);
     const ok = await requestDepositAssign(boss, right, a.uid, "cash");
-    await decide(boss, ok.approvalId, "approve");
+    await decide(checker, ok.approvalId, "approve");
     assert.equal(await balance(agentAccount(a.uid)), 0);
     assert.equal(await balance(PLATFORM.suspense), suspenseBefore);
     assert.equal((await db.doc(`deposits/${right}`).get()).get("matchedBy"), "staff_cash");

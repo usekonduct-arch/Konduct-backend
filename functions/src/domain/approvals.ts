@@ -1,9 +1,11 @@
 /**
  * Maker-checker (FR-ADM-03, SEC-PAY-06). Sensitive actions are requested by one person and
- * executed when a staff member with the right role approves them. That must be a *different*
- * person, except that an admin may approve their own request (the owner's choice for a small
- * team); such decisions are marked selfApproved. Each request and decision is audited with who,
- * when and from where (FR-ADM-05).
+ * executed when a staff member with the right role approves them. That must always be a
+ * *different* person — no self-approval, for anyone. An earlier version let an admin approve
+ * their own request as a small-team convenience, but that collapsed the whole control to a single
+ * login: one compromised admin could request a ledger adjustment crediting a wallet they control,
+ * approve it themselves, and withdraw it. With two admins, the other one signs. Each request and
+ * decision is audited with who, when and from where (FR-ADM-05).
  */
 import { z } from "zod";
 
@@ -48,7 +50,8 @@ export async function decide(actor: Actor, approvalId: string, decision: "approv
     const kind = snap.get("kind") as ApprovalKind;
     if (snap.get("status") !== "pending") fail("failed-precondition", "decided", "This request was already decided.");
     const own = snap.get("makerUid") === actor.uid;
-    if (own && actor.role !== "admin") fail("permission-denied", "same_person", "Someone else has to approve your own request.");
+    // No self-approval, regardless of role: the checker must be a different person (FR-ADM-03).
+    if (own) fail("permission-denied", "same_person", "Someone else has to approve your own request.");
     if (!CHECKERS[kind].includes(actor.role as StaffRole)) fail("permission-denied", "wrong_role", "Your role can't approve this.");
     tx.update(ref, { status: decision === "approve" ? "executing" : "rejected", checkerUid: actor.uid, selfApproved: own, note: note ?? null, decidedAtMs: Date.now(), ...touched() });
     audit({ actor: actor.uid, action: `approval.${decision}.${kind}`, target: ref.path, ip: actor.ip, after: own ? { selfApproved: true } : undefined }, tx);

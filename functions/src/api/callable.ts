@@ -12,9 +12,15 @@ type Opts = { secrets?: SecretParam[]; minInstances?: number; memory?: "256MiB" 
 
 /**
  * Every app-facing endpoint goes through here (SEC-APP-02/03):
- * - App Check token required when enforced; token replay protection on money endpoints
+ * - App Check token required when enforced (ENFORCE_APP_CHECK); rejected before the handler runs
  * - input parsed with a strict schema (unknown fields rejected)
  * - unexpected errors become a generic "internal" so stack traces and internals never leak
+ *
+ * Replay of a money call is defeated by the endpoints themselves, not by App Check: confirmPayment
+ * and createTopUp are idempotent on their key, and payouts hold a PIN plus a one-in-progress lock.
+ * App Check *consume*-based replay protection is deliberately not used — it needs the apps to send
+ * limited-use tokens (getLimitedUseToken), and consuming the SDK's normal cached token would reject
+ * every genuine call until it refreshed. See docs/security.md if that trade changes.
  */
 export function callable<S extends z.ZodType, R>(schema: S, handler: (req: CallableRequest, data: z.infer<S>) => Promise<R>, opts: Opts = {}) {
   const run = async (req: CallableRequest): Promise<R> => {
