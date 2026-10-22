@@ -50,8 +50,12 @@ if (missing.length) {
   process.exit(1);
 }
 
+// Callables only: onSchedule functions have a .run too, and the jobs must stay behind JOBS_SECRET.
 const callables = new Map<string, Callable>(
-  Object.entries(endpoints).filter((e): e is [string, Callable & typeof e[1]] => typeof (e[1] as Partial<Callable>)?.run === "function"),
+  Object.entries(endpoints).filter(
+    (e): e is [string, Callable & typeof e[1]] =>
+      typeof (e[1] as Partial<Callable>)?.run === "function" && Boolean((e[1] as { __endpoint?: { callableTrigger?: unknown } }).__endpoint?.callableTrigger),
+  ),
 );
 
 const app = express();
