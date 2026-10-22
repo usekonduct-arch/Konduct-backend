@@ -23,7 +23,36 @@ function readNgn(b: Record<string, unknown>): number | null {
   return toKobo(ngn.available_balance) + (ngn.pending_balance ? toKobo(ngn.pending_balance) : 0);
 }
 
-export async function reconcile() {
+/** The ledger's Bachs float (less payouts already transferred out) against what Bachs holds. */
+async function compareFloat() {
+  const [floatDoc, inFlight] = await Promise.all([
+    db.doc(`wallets/${PLATFORM.bachsFloat}`).get(),
+    db.collection("payouts").where("status", "in", ["transferred", "submitted", "unknown"]).get(),
+  ]);
+  const ledgerFloat = (floatDoc.get("balanceKobo") as number) ?? 0;
+  const transferredOut = inFlight.docs.filter((d) => d.get("transferId")).reduce((s, d) => s + d.get("amountKobo") + d.get("feeKobo"), 0);
+  const expected = ledgerFloat - transferredOut;
+  let actual: number | null = null;
+  let problem: string | null = null;
+  try {
+    actual = readNgn(await getBalances());
+    if (actual === null) problem = "bachs NGN balance missing from response";
+  } catch (e) {
+    problem = `bachs balance unavailable: ${(e as Error).message}`;
+  }
+  const variance = actual === null ? null : actual - expected;
+  return { ledgerFloat, transferredOut, expected, actual, variance, problem };
+}
+
+const outOfTolerance = (variance: number | null) => variance !== null && Math.abs(variance) > RULES.reconToleranceKobo;
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * [recheckAfterMs]: a float difference is looked at again after this long before it counts. Money
+ * in motion shows as a difference for a moment: a payout Bachs has transferred whose record still
+ * says "reserved", a top-up Bachs holds whose webhook is on its way.
+ */
+export async function reconcile(opts: { recheckAfterMs?: number } = {}) {
   const started = Date.now();
   const since = Timestamp.fromMillis(started - 26 * 3_600_000);
   const problems: string[] = [];
@@ -36,22 +65,14 @@ export async function reconcile() {
   }
 
   // 2. Books vs Bachs.
-  const [floatDoc, inFlight] = await Promise.all([
-    db.doc(`wallets/${PLATFORM.bachsFloat}`).get(),
-    db.collection("payouts").where("status", "in", ["transferred", "submitted", "unknown"]).get(),
-  ]);
-  const ledgerFloat = (floatDoc.get("balanceKobo") as number) ?? 0;
-  const transferredOut = inFlight.docs.filter((d) => d.get("transferId")).reduce((s, d) => s + d.get("amountKobo") + d.get("feeKobo"), 0);
-  const expected = ledgerFloat - transferredOut;
-  let actual: number | null = null;
-  try {
-    actual = readNgn(await getBalances());
-  } catch (e) {
-    problems.push(`bachs balance unavailable: ${(e as Error).message}`);
+  let float = await compareFloat();
+  if (outOfTolerance(float.variance)) {
+    await pause(opts.recheckAfterMs ?? 120_000);
+    float = await compareFloat();
   }
-  if (actual === null && !problems.some((p) => p.startsWith("bachs"))) problems.push("bachs NGN balance missing from response");
-  const variance = actual === null ? null : actual - expected;
-  if (variance !== null && Math.abs(variance) > RULES.reconToleranceKobo) problems.push(`float variance ${variance} kobo`);
+  const { ledgerFloat, transferredOut, expected, actual, variance } = float;
+  if (float.problem) problems.push(float.problem);
+  if (outOfTolerance(variance)) problems.push(`float variance ${variance} kobo`);
 
   const [unmatched, openFlags] = await Promise.all([
     db.collection("deposits").where("status", "==", "unmatched").count().get(),

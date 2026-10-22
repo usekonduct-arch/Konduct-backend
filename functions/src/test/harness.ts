@@ -19,7 +19,9 @@ if (!process.env.FIRESTORE_EMULATOR_HOST) throw new Error("Run emulator tests wi
 
 /* ------------------------------------------------------------ fake Bachs */
 
-type Route = (body: any, headers: Record<string, string>) => { status?: number; json: unknown };
+type Reply = { status?: number; json: unknown };
+/** A route may be async: it can make something else happen (a webhook) before Bachs answers. */
+type Route = (body: any, headers: Record<string, string>) => Reply | Promise<Reply>;
 export const bachsCalls: { method: string; path: string; body: any; headers: Record<string, string> }[] = [];
 const routes = new Map<string, Route>();
 export function onBachs(method: string, pathPrefix: string, r: Route) {
@@ -39,7 +41,7 @@ globalThis.fetch = (async (input: any, init: any = {}) => {
   bachsCalls.push({ method, path: url.pathname + url.search, body, headers });
   const key = [...routes.keys()].filter((k) => `${method} ${url.pathname}`.startsWith(k)).sort((a, b) => b.length - a.length)[0];
   if (!key) return new Response(JSON.stringify({ error_code: "NOT_FOUND", detail: "no fake route" }), { status: 404 });
-  const r = routes.get(key)!(body, headers);
+  const r = await routes.get(key)!(body, headers);
   return new Response(JSON.stringify(r.json), { status: r.status ?? 200, headers: { "x-request-id": "req_test" } });
 }) as typeof fetch;
 

@@ -225,9 +225,12 @@ export async function checkPin(uid: string, pin: unknown): Promise<void> {
   }
   const attempts = await db.runTransaction(async (tx) => {
     const s = await tx.get(ref);
+    // A guess sent alongside the one that locked the PIN passed the check above before the lock
+    // existed. It must not count from zero again, or it would write the lock away.
+    if (millis(s.get("lockedUntil")) > Date.now()) return RULES.pinMaxAttempts;
     const n = (s.get("failedAttempts") ?? 0) + 1;
     const lock = n >= RULES.pinMaxAttempts;
-    tx.update(ref, { failedAttempts: lock ? 0 : n, lockedUntil: lock ? Date.now() + RULES.pinLockMs : 0, ...touched() });
+    tx.update(ref, lock ? { failedAttempts: 0, lockedUntil: Date.now() + RULES.pinLockMs, ...touched() } : { failedAttempts: n, ...touched() });
     if (lock) tx.create(db.collection("flags").doc(), { type: "pin_lockout", uid, status: "open", ...stamp() });
     return n;
   });

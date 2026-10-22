@@ -147,7 +147,7 @@ export async function settleTopUp(checkoutId: string, reference: string | null, 
   if (paidKobo !== t.get("amountKobo")) await flag("topup_amount_differs", { topupId, expected: t.get("amountKobo"), paid: paidKobo });
 
   const uid = t.get("uid") as string;
-  await creditRider({
+  const posted = await creditRider({
     txId: `topup_${topupId}`,
     uid,
     paidKobo,
@@ -156,6 +156,8 @@ export async function settleTopUp(checkoutId: string, reference: string | null, 
     refs: { topupId, checkoutId, chargeId: s.charge?.id ?? null },
     after: (tx) => tx.update(ref, { status: "credited", creditedKobo: paidKobo, chargeId: s.charge?.id ?? null, lastCheck: { why: "credited", atMs: Date.now() }, ...touched() }),
   });
+  // Bachs sends checkout.completed and collection.succeeded together; only the one that credited says so.
+  if (!posted) return { handled: true as const, why: "already credited" };
   await notify(uid, "wallet.funded", { title: `${naira(paidKobo)} added`, body: "Your Konduct wallet is topped up.", data: { amountKobo: String(paidKobo) } });
   return { handled: true as const, why: "credited" };
 }
@@ -220,7 +222,7 @@ export async function expireTopUp(reference: string | null, checkoutId?: string 
 /**
  * Posts a deposit into a rider's wallet. Konduct bears Bachs's processing fee (the rider sees
  * the full amount they sent). Over-limit deposits can't be refused (a bank transfer can't be
- * stopped), so they are credited and flagged for review.
+ * stopped), so they are credited and flagged for review. False when it was already posted.
  */
 async function creditRider(p: {
   txId: string;
@@ -241,7 +243,7 @@ async function creditRider(p: {
   const overLimit = await db.runTransaction(async (tx) => {
     const [daily, user] = await tx.getAll(dailyRef(p.uid), db.doc(`users/${p.uid}`));
     const ledger = await prepare(tx, { txId: p.txId, type: p.type, legs, refs: p.refs });
-    if (ledger.alreadyPosted) return false;
+    if (ledger.alreadyPosted) return null;
     ledger.commit();
     p.after(tx);
     tx.set(daily.ref, { uid: p.uid, fundKobo: FieldValue.increment(p.paidKobo), ...touched() }, { merge: true });
@@ -250,6 +252,7 @@ async function creditRider(p: {
     return ledger.balance(riderAccount(p.uid)) > lim.maxBalanceKobo || readDaily(daily).fundKobo + p.paidKobo > lim.dailyFundKobo;
   });
   if (overLimit) await flag("funding_over_limit", { uid: p.uid, txId: p.txId });
+  return overLimit !== null;
 }
 
 type DepositData = {
@@ -336,7 +339,7 @@ export async function settleDeposit(eventId: string, d: DepositData) {
   // re-pointing a sender to someone else.
   const payerRef = senderKey ? db.doc(`payerAccounts/${sha256(senderKey)}`) : null;
   const linkSender = Boolean(payerRef && matchedBy === "code" && !(await payerRef.get()).exists);
-  await creditRider({
+  const posted = await creditRider({
     txId: `deposit_${chargeId}`,
     uid,
     paidKobo,
@@ -348,6 +351,7 @@ export async function settleDeposit(eventId: string, d: DepositData) {
       if (linkSender && payerRef) tx.create(payerRef, { uid, firstSeenCharge: chargeId, ...stamp() });
     },
   });
+  if (!posted) return { handled: true, why: "already credited" };
   await notify(uid, "wallet.funded", { title: `${naira(paidKobo)} added`, body: "Your bank transfer has landed in your Konduct wallet.", data: { amountKobo: String(paidKobo) } });
   return { handled: true, why: `credited by ${matchedBy}` };
 }

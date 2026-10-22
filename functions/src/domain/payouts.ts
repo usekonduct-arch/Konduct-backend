@@ -300,6 +300,20 @@ export async function payoutMember(uid: string, trigger: Trigger, requestedKobo?
   return { status: "submitted", payoutId, amountKobo };
 }
 
+/**
+ * Moves a payout on, but only from one of [from]: a webhook or the other job may have moved it
+ * while we waited on Bachs, and a paid or returned payout must never go back to an earlier step.
+ * False when it had already moved.
+ */
+function advance(ref: FirebaseFirestore.DocumentReference, from: string[], patch: Record<string, unknown>) {
+  return db.runTransaction(async (tx) => {
+    const s = await tx.get(ref);
+    if (!from.includes(s.get("status"))) return false;
+    tx.update(ref, { ...patch, ...touched() });
+    return true;
+  });
+}
+
 /** Moves money at Bachs for a reserved payout. Safe to call again: every write is idempotent. */
 export async function submit(payoutId: string) {
   const ref = db.doc(`payouts/${payoutId}`);
@@ -316,12 +330,13 @@ export async function submit(payoutId: string) {
         },
         `payout-${payoutId}-transfer`,
       );
-      await ref.update({ status: "transferred", transferId: tr.id, ...touched() });
+      if (!(await advance(ref, ["reserved"], { status: "transferred", transferId: tr.id }))) return;
       p.status = "transferred";
+      p.transferId = tr.id;
     }
     if (p.status === "transferred") {
       const po = await createPayout(p.bachsAccountId, { destination: p.destinationId, amount: toDecimal(p.amountKobo), reference: payoutId }, `payout-${payoutId}`);
-      await ref.update({ status: "submitted", bachsPayoutId: po.id, ...touched() });
+      await advance(ref, ["transferred"], { status: "submitted", bachsPayoutId: po.id });
     }
   } catch (e) {
     if (e instanceof BachsError && !e.uncertain) {
@@ -329,7 +344,7 @@ export async function submit(payoutId: string) {
       if (p.status === "transferred") await pullBack(payoutId, p);
       await release(payoutId, `bachs_${e.code}`);
     } else {
-      await ref.update({ status: "unknown", lastError: e instanceof BachsError ? e.code : "error", ...touched() });
+      await advance(ref, ["reserved", "transferred"], { status: "unknown", lastError: e instanceof BachsError ? e.code : "error" });
     }
   }
 }
@@ -355,6 +370,11 @@ async function settle(payoutId: string, data: Record<string, unknown>) {
   const result = await db.runTransaction(async (tx) => {
     const p = await tx.get(ref);
     if (p.get("status") === "paid") return null;
+    if (p.get("status") === "returned") {
+      // Bachs says paid after we already gave the money back to the wallet: a person must sort it out.
+      tx.create(db.collection("flags").doc(), { type: "payout_paid_after_return", payoutId, status: "open", ...stamp() });
+      return null;
+    }
     const amountKobo = p.get("amountKobo") as number;
     const feeKobo = data.withdrawal_fee ? toKobo(String(data.withdrawal_fee)) : (p.get("feeKobo") as number);
     const ledger = await prepare(tx, {
@@ -367,6 +387,10 @@ async function settle(payoutId: string, data: Record<string, unknown>) {
       ],
       refs: { payoutId },
     });
+    if (ledger.alreadyPosted) {
+      tx.update(ref, { status: "paid", ...touched() });
+      return null; // the person was told when it was posted
+    }
     ledger.commit();
     tx.update(ref, { status: "paid", paidAtMs: Date.now(), feeKobo, ...touched() });
     audit({ actor: "bachs:webhook", action: "payout.paid", target: ref.path, after: { amountKobo } }, tx);
@@ -406,6 +430,10 @@ async function release(payoutId: string, reason: string) {
       refs: { payoutId },
       reversalOf: `payout_${payoutId}`,
     });
+    if (ledger.alreadyPosted) {
+      tx.update(ref, { status: "returned", ...touched() });
+      return null;
+    }
     ledger.commit();
     tx.update(ref, { status: "returned", failureReason: reason, ...touched() });
     audit({ actor: "system:payouts", action: "payout.returned", target: ref.path, after: { reason } }, tx);
@@ -428,9 +456,9 @@ export async function reconcilePayouts() {
         else if (po.status === "failed") await onPayoutEvent("payout.failed", d.id, {});
       } else {
         // Re-running submit replays the same idempotency keys: Bachs returns the original
-        // result if it happened, or performs it once if it didn't.
-        await d.ref.update({ status: p.transferId ? "transferred" : "reserved", ...touched() });
-        await submit(d.id);
+        // result if it happened, or performs it once if it didn't. Only from the status we read:
+        // a webhook may have paid or returned it since.
+        if (await advance(d.ref, [p.status], { status: p.transferId ? "transferred" : "reserved" })) await submit(d.id);
       }
     } catch {
       /* try again next run */

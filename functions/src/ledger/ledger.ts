@@ -220,16 +220,24 @@ export async function verifyAccount(accountId: string): Promise<{ ok: boolean; p
   const acct = await db.doc(`wallets/${accountId}`).get();
   if (!acct.exists) return { ok: false, problem: "missing account", entries: 0 };
   const normal = acct.get("normal") as Side;
+  // Checked against the head as read above. Postings that land while the entries are walked
+  // (the account stays live during the nightly check) come after it and wait for the next run.
+  const headSeq = acct.get("seq") as number;
   let prev = GENESIS;
   let balance = 0;
   let seq = 0;
   let last: FirebaseFirestore.QueryDocumentSnapshot | undefined;
-  for (;;) {
+  let ahead: number | null = null;
+  walk: for (;;) {
     let q = db.collection("ledgerEntries").where("account", "==", accountId).orderBy("seq").limit(500);
     if (last) q = q.startAfter(last);
     const page = await q.get();
     for (const d of page.docs) {
       const e = d.data();
+      if (e.seq > headSeq) {
+        ahead = e.seq;
+        break walk;
+      }
       seq += 1;
       if (e.seq !== seq) return { ok: false, problem: `gap or reorder at seq ${seq}`, entries: seq };
       if (e.prevHash !== prev) return { ok: false, problem: `broken chain at seq ${seq}`, entries: seq };
@@ -243,9 +251,14 @@ export async function verifyAccount(accountId: string): Promise<{ ok: boolean; p
     if (page.size < 500) break;
     last = page.docs[page.docs.length - 1];
   }
-  if (seq !== acct.get("seq")) return { ok: false, problem: "entry count differs from account", entries: seq };
+  if (seq !== headSeq) return { ok: false, problem: "entry count differs from account", entries: seq };
   if (balance !== acct.get("balanceKobo")) return { ok: false, problem: "cached balance differs from entries", entries: seq };
   if (prev !== acct.get("lastHash")) return { ok: false, problem: "head hash differs", entries: seq };
+  // A real posting moves the head in the same transaction as its entry, so by now the head has
+  // caught up with it. One still past the head was written some other way.
+  if (ahead !== null && ((await db.doc(`wallets/${accountId}`).get()).get("seq") as number) < ahead) {
+    return { ok: false, problem: `entry beyond the account's head at seq ${ahead}`, entries: seq };
+  }
   return { ok: true, entries: seq };
 }
 

@@ -77,6 +77,12 @@ export async function resolveDispute(actor: Actor, input: z.infer<typeof Resolve
   if (!d.exists || d.get("state") !== "under_review") fail("failed-precondition", "bad_state", "Take the dispute for review first.");
   if (input.outcome === "reject") {
     await db.runTransaction(async (tx) => {
+      // Re-read here: someone else may have refunded it, or asked for a refund that awaits approval.
+      const [now, requests] = await Promise.all([tx.get(ref), tx.get(db.collection("approvals").where("target", "==", ref.path))]);
+      if (now.get("state") !== "under_review") fail("failed-precondition", "bad_state", "This dispute was already resolved.");
+      if (requests.docs.some((a) => a.get("kind") === "refund" && ["pending", "executing"].includes(a.get("status")))) {
+        fail("failed-precondition", "refund_pending", "A refund for this dispute is waiting for approval. Reject that request in Approvals first.");
+      }
       tx.update(ref, { state: "resolved", resolution: { outcome: "rejected", note: input.note, byUid: actor.uid }, ...touched() });
       audit({ actor: actor.uid, action: "dispute.reject", target: ref.path, ip: actor.ip }, tx);
     });
@@ -122,6 +128,8 @@ export async function executeRefund(disputeId: string, amountKobo: number, byUid
     if (!(e instanceof InsufficientFunds)) throw e;
     r = await run(false);
   }
-  if (!r.already && r.payer) await notify(r.payer, "dispute.update", { title: `${naira(amountKobo)} refunded`, body: `Your dispute on ${r.reference} is resolved.` });
+  // Resolved some other way first (rejected, or refunded by someone else): this call paid nothing.
+  if (r.already) return { state: "resolved", refundedKobo: 0, alreadyResolved: true };
+  if (r.payer) await notify(r.payer, "dispute.update", { title: `${naira(amountKobo)} refunded`, body: `Your dispute on ${r.reference} is resolved.` });
   return { state: "resolved", refundedKobo: amountKobo };
 }

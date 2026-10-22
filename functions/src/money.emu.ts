@@ -19,17 +19,18 @@ import { deleteAd, sendNotice, uploadMedia, upsertAd } from "./domain/messaging"
 import { handleBachsWebhook } from "./bachs/webhook";
 import { setVehicleStatus, setUserStatus, issueVehicleQr, inviteDriver, resetDriverCode, requestAdjustment, requestKycTier, UpdateUser, updateUserDetails } from "./domain/staff";
 import { addStaff, markPasswordChosen, resetStaffPassword, revokeStaff, setStaffRole } from "./domain/team";
-import { claimDriverAccount } from "./domain/accounts";
+import { checkPin, claimDriverAccount } from "./domain/accounts";
 import { memberToken } from "./lib/guards";
 import { decide } from "./domain/approvals";
 import { onPayoutEvent, payoutDriver, requestRiderWithdrawal, setPayoutAccount } from "./domain/payouts";
-import { openDispute, resolveDispute, reviewDispute } from "./domain/disputes";
+import { executeRefund, openDispute, resolveDispute, reviewDispute } from "./domain/disputes";
 import { reconcile } from "./domain/recon";
 import { fleetRef, readFleet, setFleet, startNewTrip } from "./domain/seats";
 import { rebuildBoard, refreshBoard, setVehiclePark } from "./domain/board";
 import { backfillDriverDays, driverDayRef } from "./domain/stats";
 import { SetBrand, setBrand } from "./domain/brand";
-import { lagosDay } from "./lib/db";
+import { lagosDay, millis } from "./lib/db";
+import { toDecimal } from "./lib/money";
 import { setParkBuses, upsertPark } from "./domain/parks";
 import { setVehicleRoute, upsertLandmark } from "./domain/landmarks";
 import { rateDriver } from "./domain/ratings";
@@ -490,6 +491,19 @@ describe("funding via Bachs", () => {
     assert.equal((await verifyAccount(riderAccount(r.uid))).ok, true);
   });
 
+  test("the two events Bachs sends for one payment, arriving together, credit once and tell the rider once", async () => {
+    const r = await makeRider(0);
+    const t = await openTopUp(r);
+    onBachs("GET", "/v1/checkout-sessions/", () => ({ json: paidCheckout(t.topupId) }));
+    const a = webhook(event(evtId(), t.topupId));
+    const b = webhook(event(evtId(), t.topupId, "checkout.completed"));
+    await Promise.all([handleBachsWebhook(a.req, a.res), handleBachsWebhook(b.req, b.res)]);
+    assert.deepEqual([a.res.code, b.res.code], [200, 200]);
+    assert.equal(await balance(riderAccount(r.uid)), 200_000);
+    const told = await db.collection(`users/${r.uid}/notifications`).where("kind", "==", "wallet.funded").get();
+    assert.equal(told.size, 1);
+  });
+
   test("a missed webhook is recovered by refreshTopUps, and the receipt verifies against the ledger", async () => {
     const r = await makeRider(0);
     const t = await openTopUp(r);
@@ -862,8 +876,9 @@ describe("disputes and books", () => {
 
   test("reconciliation halts payouts when the books and Bachs disagree", async () => {
     onBachs("GET", "/v1/balances", () => ({ json: { balances: [{ currency: "NGN", available_balance: "1.00" }] } }));
-    const report = await reconcile();
+    const report = await reconcile({ recheckAfterMs: 0 });
     assert.equal(report.ok, false);
+    assert.ok(report.problems.some((p) => p.startsWith("float variance")), "still different on the second look");
     assert.equal((await db.doc("config/switches").get()).get("payoutsHaltedByRecon"), true);
     await db.doc("config/switches").set({ payoutsHaltedByRecon: false }, { merge: true });
   });
@@ -1285,5 +1300,112 @@ describe("drivers' rating feedback and app versions", () => {
     assert.equal((await db.doc("config/app").get()).get("rider").minBuild, 4);
     assert.equal(SetAppVersions.safeParse({ driver: { minBuild: 9, latestBuild: 2, updateUrl: "https://konduct.com.ng/get" }, reason: "typo test" }).success, false);
     assert.equal(SetAppVersions.safeParse({ driver: { minBuild: 1, latestBuild: 2, updateUrl: "http://konduct.com.ng/get" }, reason: "insecure link" }).success, false);
+  });
+});
+
+describe("things happening at the same time", () => {
+  test("wrong PINs sent at once can't clear the lock they set", async () => {
+    const r = await makeRider(0);
+    await setPin(r.uid, "2580");
+    const out = await Promise.all(Array.from({ length: 6 }, () => reason(checkPin(r.uid, "1397"))));
+    assert.ok(out.includes("pin_locked"), out.join());
+    assert.ok(millis((await db.doc(`pins/${r.uid}`).get()).get("lockedUntil")) > Date.now(), "still locked");
+    await db.doc(`rateLimits/${r.uid}__pincheck`).delete(); // the burst used up the minute's tries
+    assert.equal(await reason(checkPin(r.uid, "2580")), "pin_locked");
+  });
+
+  test("the ledger check isn't fooled by postings landing while it reads, but still catches a stray entry", async () => {
+    const r = await makeRider(100_000);
+    const account = riderAccount(r.uid);
+    let posting = true;
+    const poster = (async () => {
+      for (let i = 0; i < 15; i++) await fund(r.uid, 100);
+      posting = false;
+    })();
+    const problems: string[] = [];
+    while (posting) {
+      const v = await verifyAccount(account);
+      if (!v.ok) problems.push(v.problem!);
+    }
+    await poster;
+    assert.deepEqual(problems, []);
+
+    // An entry past the head that no posting wrote.
+    const head = await db.doc(`wallets/${account}`).get();
+    const seq = (head.get("seq") as number) + 1;
+    const stray = db.doc(`ledgerEntries/${account}__${String(seq).padStart(10, "0")}`);
+    await stray.set({ account, seq, txId: "stray", side: "credit", amountKobo: 1, balanceAfterKobo: 0, type: "x", at: 0, prevHash: head.get("lastHash"), hash: "x" });
+    try {
+      const v = await verifyAccount(account);
+      assert.equal(v.ok, false);
+      assert.match(v.problem!, /beyond the account's head/);
+    } finally {
+      await stray.delete();
+    }
+  });
+
+  test("a float difference that's gone a moment later doesn't halt payouts", async () => {
+    const [floatDoc, inFlight] = await Promise.all([
+      db.doc(`wallets/${PLATFORM.bachsFloat}`).get(),
+      db.collection("payouts").where("status", "in", ["transferred", "submitted", "unknown"]).get(),
+    ]);
+    const expected = ((floatDoc.get("balanceKobo") as number) ?? 0) - inFlight.docs.filter((d) => d.get("transferId")).reduce((s, d) => s + d.get("amountKobo") + d.get("feeKobo"), 0);
+    let calls = 0;
+    // The first look catches a transfer half-recorded; the second sees the books agree.
+    onBachs("GET", "/v1/balances", () => ({ json: { balances: [{ currency: "NGN", available_balance: calls++ === 0 ? "1.00" : toDecimal(expected) }] } }));
+    try {
+      const report = await reconcile({ recheckAfterMs: 0 });
+      assert.equal(calls, 2);
+      assert.ok(!report.problems.some((p) => p.startsWith("float variance")), report.problems.join("; "));
+    } finally {
+      await db.doc("config/switches").set({ payoutsHaltedByRecon: false }, { merge: true });
+    }
+  });
+
+  test("a paid webhook that lands while the payout is still being submitted is never undone", async () => {
+    const d = await makeDriverWithVehicle(60_000);
+    const r = await makeRider(500_000);
+    await setPin(r.uid, "2580");
+    await pay(r, d.token, { pin: "2580" });
+    await db.runTransaction(async (tx) => {
+      const pa = db.collection("payoutAccounts").doc();
+      tx.set(pa, { uid: d.uid, bachsAccountId: "acct_d3", destinationId: "pd_3", accountLast4: "2222", status: "active", holdUntilMs: 0, ...stamp() });
+      tx.update(db.doc(`users/${d.uid}`), { payoutAccountId: pa.id });
+    });
+    onBachs("GET", "/v1/payouts/destinations/pd_3", () => ({ json: { id: "pd_3", is_usable: true } }));
+    onBachs("POST", "/v1/transfers", (b) => ({ json: { id: uniq("tr_"), status: "paid", amount: b.amount, currency: "NGN" } }));
+    onBachs("POST", "/v1/payouts", async (b) => {
+      // Bachs pays it and its webhook reaches us before its answer to our request does.
+      await onPayoutEvent("payout.paid", b.reference, { withdrawal_fee: "50.00" });
+      return { json: { id: uniq("pay_"), status: "paid", amount: b.amount, reference: b.reference } };
+    });
+    const run = await payoutDriver(d.uid, "driver_request");
+    assert.equal((await db.doc(`payouts/${run.payoutId}`).get()).get("status"), "paid");
+    await onPayoutEvent("payout.paid", run.payoutId!, { withdrawal_fee: "50.00" }); // and Bachs retries it
+    const told = await db.collection(`users/${d.uid}/notifications`).where("kind", "==", "payout.paid").get();
+    assert.equal(told.size, 1);
+    assert.equal((await verifyAccount(driverAccount(d.uid))).ok, true);
+  });
+
+  test("a dispute can't be rejected while its refund waits for approval, and a late refund pays nothing", async () => {
+    const d = await makeDriverWithVehicle(300_000);
+    const r = await makeRider(1_000_000, { kycTier: 2 });
+    await setPin(r.uid, "2580");
+    const out = await pay(r, d.token, { passengers: 2, pin: "2580" }); // ₦6,000: above the second-person line
+    await openDispute(r.actor, { txId: out.txId, reason: "wrong_amount", note: "" });
+    const sup = actorFor(uniq("sup"), "support", { role: "support", status: "active" });
+    await reviewDispute(sup, out.txId);
+    const asked = (await resolveDispute(sup, { disputeId: out.txId, outcome: "refund", note: "overcharged" })) as { approvalId: string; status: string };
+    assert.equal(asked.status, "pending");
+
+    assert.equal(await reason(resolveDispute(sup, { disputeId: out.txId, outcome: "reject", note: "no" })), "refund_pending");
+    const admin = actorFor(uniq("adm"), "admin", { role: "admin", status: "active" });
+    await decide(admin, asked.approvalId, "reject");
+    await resolveDispute(sup, { disputeId: out.txId, outcome: "reject", note: "checked again" });
+
+    // A refund that arrives after the dispute closed moves no money and says so.
+    const late = await executeRefund(out.txId, 600_000, admin.uid);
+    assert.equal(late.refundedKobo, 0);
+    assert.equal(await balance(riderAccount(r.uid)), 400_000);
   });
 });
