@@ -17,12 +17,19 @@ import { type Actor, rateLimit } from "../lib/guards";
 
 const landmarkId = z.string().regex(/^[A-Za-z0-9_-]{3,40}$/);
 
+/** Groups on the students' campus map. */
+export const PLACE_CATEGORIES = ["academic", "office", "hostel", "food", "health", "bank", "worship", "other"] as const;
+
 export const UpsertLandmark = z.strictObject({
   landmarkId,
   name: z.string().trim().min(2).max(60),
   lat: z.number().min(-90).max(90),
   lng: z.number().min(-180).max(180),
   active: z.boolean(),
+  /** Shown on the students' campus map. Separate from active, which is the drivers' list. */
+  onMap: z.boolean().optional(),
+  category: z.enum(PLACE_CATEGORIES).optional(),
+  note: z.string().trim().max(200).optional(),
 });
 
 export async function upsertLandmark(actor: Actor, input: z.infer<typeof UpsertLandmark>) {
@@ -31,7 +38,7 @@ export async function upsertLandmark(actor: Actor, input: z.infer<typeof UpsertL
   return db.runTransaction(async (tx) => {
     const l = await tx.get(ref);
     tx.set(ref, { ...fields, ...(l.exists ? touched() : stamp()) }, { merge: true });
-    audit({ actor: actor.uid, action: "landmark.upsert", target: ref.path, before: l.exists ? { name: l.get("name"), lat: l.get("lat"), lng: l.get("lng"), active: l.get("active") } : null, after: fields, ip: actor.ip }, tx);
+    audit({ actor: actor.uid, action: "landmark.upsert", target: ref.path, before: l.exists ? { name: l.get("name"), lat: l.get("lat"), lng: l.get("lng"), active: l.get("active"), onMap: l.get("onMap"), category: l.get("category"), note: l.get("note") } : null, after: fields, ip: actor.ip }, tx);
     return { created: !l.exists };
   });
 }

@@ -344,6 +344,16 @@ describe("trip routes and ratings", () => {
     return landmarkId;
   };
 
+  test("a landmark can go on the campus map without joining the drivers' list, and old saves leave it there", async () => {
+    const landmarkId = uniq("lm").toLowerCase();
+    const ref = db.doc(`landmarks/${landmarkId}`);
+    await upsertLandmark(admin, { landmarkId, name: "Admissions office", lat: 7.76, lng: 4.6, active: false, onMap: true, category: "office", note: "Room 228" });
+    assert.deepEqual([(await ref.get()).get("onMap"), (await ref.get()).get("category"), (await ref.get()).get("note")], [true, "office", "Room 228"]);
+    await upsertLandmark(admin, { landmarkId, name: "Admissions office", lat: 7.76, lng: 4.6, active: true });
+    assert.equal((await ref.get()).get("onMap"), true);
+    assert.equal((await ref.get()).get("active"), true);
+  });
+
   test("the driver picks a route between landmarks; a new trip clears the seats; staff can change it", async () => {
     const gate = await place("Main gate", 7.7553, 4.5476);
     const shasha = await place("Shasha park", 7.7743, 4.5476);

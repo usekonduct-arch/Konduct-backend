@@ -152,6 +152,7 @@ Storage or the Blaze plan:
 - **To one person** (`staffSendNotice`, audience `one`): a doc in `users/{uid}/notifications` plus a push to their phones.
   **To a group**: one `broadcasts/{id}` doc the apps read directly (no fan-out writes against the Spark quota) plus one topic push.
   `staffSetBroadcast` takes a group message back out of the inboxes.
+- **Campus map**: landmarks with `onMap` show on the student app's Campus map with a group and a note, and parks with a pin join them. `active` stays the drivers' list, so an office can be on the map without being a trip stop. Only add a place after checking the pin on the ground.
 - **Analytics** (`domain/analytics.ts`, console Analytics page, admin and auditor): profit from the ledger plus lines an admin types in, usage from the ride records.
   A finished Lagos day is added up the first time it's asked for and stored in `analyticsDays` and `analyticsDayUsers`; today is live. No cron and no writes on the payment path.
   Advertisers' payments that reach Bachs are assigned in Deposits as Konduct income (a second person approves). Run `firebase deploy --only firestore:indexes` for the wallets index behind "Held right now".
