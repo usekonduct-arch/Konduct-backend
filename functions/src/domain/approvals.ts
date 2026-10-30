@@ -70,6 +70,30 @@ export async function decide(actor: Actor, approvalId: string, decision: "approv
 
 const Adjustment = z.strictObject({ account: z.string().regex(/^[A-Za-z0-9_-]{3,80}$/), side: z.enum(["debit", "credit"]), amountKobo: z.number().int().positive(), memo: z.string().min(5).max(200) });
 
+/**
+ * Money a business paid Konduct, such as an advertiser's bank transfer. It's already in the Bachs
+ * float as an unmatched deposit, so this only moves it from suspense to income (analytics.ts).
+ */
+async function depositToIncome(depositId: string, category: string, approvalId: string) {
+  await db.runTransaction(async (tx) => {
+    const dep = await tx.get(db.doc(`deposits/${depositId}`));
+    if (dep.get("status") !== "unmatched") fail("failed-precondition", "not_unmatched", "This deposit is already assigned.");
+    const amountKobo = dep.get("amountKobo") as number;
+    const ledger = await prepare(tx, {
+      txId: `income_${depositId}`,
+      type: "income",
+      legs: [
+        { account: PLATFORM.suspense, side: "debit", amountKobo },
+        { account: PLATFORM.revenue, side: "credit", amountKobo },
+      ],
+      refs: { depositId, category, approvalId },
+    });
+    ledger.commit();
+    tx.update(dep.ref, { status: "credited", matchedBy: "income", incomeCategory: category, ...touched() });
+  });
+  return { income: category };
+}
+
 async function execute(kind: ApprovalKind, payload: Record<string, unknown>, checkerUid: string, approvalId: string) {
   switch (kind) {
     case "payout_account": {
@@ -100,6 +124,7 @@ async function execute(kind: ApprovalKind, payload: Record<string, unknown>, che
     }
     case "deposit_assign": {
       const depositId = String(payload.depositId);
+      if (payload.to === "income") return depositToIncome(depositId, String(payload.category), approvalId);
       const uid = String(payload.uid);
       // "cash": a staff member banked cash from cash rides; it clears what they owe (cashrides.ts).
       const cash = payload.to === "cash";

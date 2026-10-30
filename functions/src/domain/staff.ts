@@ -272,6 +272,16 @@ export const requestDepositAssign = (actor: Actor, depositId: string, uid: strin
     payload: { depositId, uid, to },
   });
 
+/** The deposit is Konduct's own income, such as an advertiser's payment: a second person approves. */
+export const requestDepositIncome = (actor: Actor, depositId: string, category: string) =>
+  requestApproval({
+    kind: "deposit_assign",
+    makerUid: actor.uid,
+    target: `deposits/${depositId}`,
+    summary: `Count deposit as Konduct income (${category})`,
+    payload: { depositId, to: "income", category },
+  });
+
 export const requestKycTier = (actor: Actor, uid: string, tier: number) =>
   requestApproval({ kind: "kyc_tier", makerUid: actor.uid, target: `users/${uid}`, summary: `Set KYC tier ${tier}`, payload: { uid, tier } });
 

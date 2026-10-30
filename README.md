@@ -152,7 +152,10 @@ Storage or the Blaze plan:
 - **To one person** (`staffSendNotice`, audience `one`): a doc in `users/{uid}/notifications` plus a push to their phones.
   **To a group**: one `broadcasts/{id}` doc the apps read directly (no fan-out writes against the Spark quota) plus one topic push.
   `staffSetBroadcast` takes a group message back out of the inboxes.
-- **Popups**: a message or ad flagged as a popup opens over the app once per phone.
+- **Analytics** (`domain/analytics.ts`, console Analytics page, admin and auditor): profit from the ledger plus lines an admin types in, usage from the ride records.
+  A finished Lagos day is added up the first time it's asked for and stored in `analyticsDays` and `analyticsDayUsers`; today is live. No cron and no writes on the payment path.
+  Advertisers' payments that reach Bachs are assigned in Deposits as Konduct income (a second person approves). Run `firebase deploy --only firestore:indexes` for the wallets index behind "Held right now".
+- **Popups**: a message flagged as a popup opens over the app once per phone; a popup ad opens once a day per phone.
 - **Spoken money alerts**: `fare.received`, `wallet.funded` and `payout.paid` go out on their own Android channels
   (`konduct_voice_fare`, `konduct_voice_wallet`, `konduct_voice_payout`) whose sound is a recorded voice clip on the alarm
   stream, so it plays with the phone on silent. With the app open, the app speaks the sentence with the amount instead

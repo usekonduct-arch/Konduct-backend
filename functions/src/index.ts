@@ -37,6 +37,7 @@ import { OpenDispute, openDispute, ResolveDispute, resolveDispute, reviewDispute
 import { createTopUp, refreshTopUps, TopUpInput } from "./domain/funding";
 import { handleReceiptPage, receiptProof, ReceiptProofInput } from "./domain/receipts";
 import { DeleteAd, deleteAd, handleMediaRequest, joinTopic, SendNotice, sendNotice, SetBroadcast, setBroadcastActive, UploadMedia, uploadMedia, UpsertAd, upsertAd } from "./domain/messaging";
+import { AddFinanceEntry, addFinanceEntry, analytics, AnalyticsInput, INCOME_CATEGORIES, VoidFinanceEntry, voidFinanceEntry } from "./domain/analytics";
 import { ConfirmInput, confirmOfflineCode, confirmPayment, previewPayment, PreviewInput } from "./domain/pay";
 import { SetParkBuses, setParkBuses, UpsertPark, upsertPark } from "./domain/parks";
 import { CashRideConfirm, confirmCashRide, CashRidePreview, myCash, previewCashRide, ReceiveCash, receiveCash } from "./domain/cashrides";
@@ -60,7 +61,7 @@ import {
   lockMyAccount,
   requestAdjustment,
   RequestAdjustment,
-  requestDepositAssign,
+  requestDepositAssign, requestDepositIncome,
   requestKycTier,
   requestReconRelease,
   requestRoleGrant,
@@ -304,6 +305,15 @@ export const staffRequestAdjustment = callable(RequestAdjustment, async (req, da
 export const staffAssignDeposit = callable(z.strictObject({ depositId: idField, uid: uidField, to: z.enum(["rider", "cash"]).default("rider") }), async (req, data) =>
   requestDepositAssign(await requireStaff(req, ["ops", "admin", "support"]), data.depositId, data.uid, data.to),
 );
+
+export const staffDepositIncome = callable(z.strictObject({ depositId: idField, category: z.enum(INCOME_CATEGORIES) }), async (req, data) =>
+  requestDepositIncome(await requireStaff(req, ["ops", "admin"]), data.depositId, data.category),
+);
+
+/** Profit and usage, for the console's Analytics page (analytics.ts). Finance roles only. */
+export const staffAnalytics = callable(AnalyticsInput, async (req, data) => analytics(await requireStaff(req, ["admin", "auditor"]), data));
+export const staffAddFinanceEntry = callable(AddFinanceEntry, async (req, data) => addFinanceEntry(await requireStaff(req, ["admin"]), data));
+export const staffVoidFinanceEntry = callable(VoidFinanceEntry, async (req, data) => voidFinanceEntry(await requireStaff(req, ["admin"]), data));
 
 export const staffSetKycTier = callable(z.strictObject({ uid: uidField, tier: z.number().int().min(1).max(2) }), async (req, data) =>
   requestKycTier(await requireStaff(req, ["ops", "admin"]), data.uid, data.tier),

@@ -139,6 +139,20 @@
       ]
     },
     {
+      "collectionGroup": "wallets",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "kind",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "balanceKobo",
+          "order": "ASCENDING"
+        }
+      ]
+    },
+    {
       "collectionGroup": "ledgerEntries",
       "queryScope": "COLLECTION",
       "fields": [
